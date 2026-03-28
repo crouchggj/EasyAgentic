@@ -32,6 +32,9 @@ TOOL_COLORS = {
     "todo": COLORS["magenta"],
     "task": COLORS["green"],
     "skill": COLORS["bright_magenta"],
+    "spawn": COLORS["bright_green"],
+    "send": COLORS["bright_cyan"],
+    "read_inbox": COLORS["cyan"],
     "default": COLORS["blue"],
 }
 

@@ -1,8 +1,12 @@
 import os
 import json
+from pathlib import Path
 from openai import OpenAI
 
-from tools import ToolRegistry, TodoManager, setup_registry, SubAgent, SkillLoader
+from tools import (
+    ToolRegistry, TodoManager, setup_registry, SubAgent, SkillLoader,
+    MessageBus, TeammateManager
+)
 from tools.colors import COLORS, colorize, tool_header, tool_args, tool_output, round_header
 
 # Configuration
@@ -11,15 +15,19 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 MODEL = os.environ.get("MODEL", "gpt-4o")
 TODO_REMINDER_THRESHOLD = 3
 SKILLS_DIR = os.environ.get("SKILLS_DIR", "skills")
+TEAM_DIR = Path(os.environ.get("TEAM_DIR", ".team"))
 
 
-def build_system_prompt(skill_loader: SkillLoader) -> str:
-    """Build system prompt with skills summary (Layer 1)."""
-    base = """You are a helpful AI assistant with access to bash commands, file reading, todo management, task delegation, and skills.
-You can execute shell commands, read files, track tasks, spawn subagents for complex subtasks, and load specialized skills.
+def build_system_prompt(skill_loader: SkillLoader, bus: MessageBus, agent_name: str) -> str:
+    """Build system prompt with skills summary and team info (Layer 1)."""
+    base = f"""You are a helpful AI assistant named '{agent_name}' with access to bash commands, file reading, todo management, task delegation, skills, and team collaboration.
+You can execute shell commands, read files, track tasks, spawn subagents for complex subtasks, load specialized skills, and coordinate with teammates.
 Always be careful when running commands and explain what you're doing.
 Use the todo tool to track progress on multi-step tasks.
-Use the skill tool to load specialized workflows when appropriate."""
+Use the skill tool to load specialized workflows when appropriate.
+Use spawn to create new teammates with specific roles.
+Use send to communicate with teammates.
+Use read_inbox to check for messages from teammates."""
 
     # Layer 1: Add skills summary to system prompt
     skills_summary = skill_loader.get_skills_summary()
@@ -33,15 +41,19 @@ class AgentLoop:
     """Agent loop with decoupled tool execution and subagent support."""
 
     def __init__(self, client: OpenAI, registry: ToolRegistry, todo_manager: TodoManager,
-                 subagent: SubAgent, skill_loader: SkillLoader):
+                 subagent: SubAgent, skill_loader: SkillLoader,
+                 bus: MessageBus, team_manager: TeammateManager, agent_name: str = "lead"):
         self.client = client
         self.registry = registry
         self.todo_manager = todo_manager
         self.subagent = subagent
         self.skill_loader = skill_loader
+        self.bus = bus
+        self.team_manager = team_manager
+        self.agent_name = agent_name
         self.todo_skip_count = 0
         self.round_num = 0
-        self.system_prompt = build_system_prompt(skill_loader)
+        self.system_prompt = build_system_prompt(skill_loader, bus, agent_name)
 
     def run(self, query: str) -> str:
         """Run the agent loop for a query."""
@@ -55,6 +67,14 @@ class AgentLoop:
         while True:
             self.round_num += 1
             print(round_header(self.round_num))
+
+            # Check inbox before each round
+            inbox = self.bus.read_inbox(self.agent_name)
+            if inbox != "[]":
+                messages.append({
+                    "role": "user",
+                    "content": f"<inbox>{inbox}</inbox>"
+                })
 
             response = self.client.chat.completions.create(
                 model=MODEL,
@@ -123,15 +143,32 @@ def main():
     subagent = SubAgent(client, MODEL)
     skill_loader = SkillLoader(SKILLS_DIR)
 
+    # Setup team
+    bus = MessageBus(TEAM_DIR)
+    team_manager = TeammateManager(TEAM_DIR, client, MODEL, bus)
+
     # Print loaded skills
     skills = skill_loader.get_skill_names()
     if skills:
         print(colorize(f"Loaded {len(skills)} skills: ", "cyan") + colorize(", ".join(skills), "dim"))
 
-    # Parent registry includes task and skill tools
-    registry = setup_registry(todo_manager, subagent_runner=subagent.run, skill_loader=skill_loader)
+    # Print team status
+    members = team_manager.list_members()
+    if members:
+        print(colorize(f"Team members: ", "green") + colorize(
+            ", ".join(f"{m['name']}({m['role']})" for m in members), "dim"))
 
-    agent = AgentLoop(client, registry, todo_manager, subagent, skill_loader)
+    # Parent registry includes all tools
+    registry = setup_registry(
+        todo_manager,
+        subagent_runner=subagent.run,
+        skill_loader=skill_loader,
+        team_manager=team_manager,
+        bus=bus,
+        agent_name="lead"
+    )
+
+    agent = AgentLoop(client, registry, todo_manager, subagent, skill_loader, bus, team_manager)
 
     print(colorize("Simple Agent", "bright_cyan") + colorize(" - Type 'quit' to exit", "dim"))
     print(colorize("-" * 40, "dim"))
