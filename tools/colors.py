@@ -35,10 +35,11 @@ TOOL_COLORS = {
 }
 
 
-def colorize(text: str, color: str) -> str:
-    """Apply color to text."""
+def colorize(text: str, color: str, styles: list = None) -> str:
+    """Apply color and optional styles to text."""
     color_code = COLORS.get(color, COLORS["blue"])
-    return f"{color_code}{text}{COLORS['reset']}"
+    style_codes = "".join(COLORS.get(s, "") for s in (styles or []))
+    return f"{color_code}{style_codes}{text}{COLORS['reset']}"
 
 
 def tool_header(tool_name: str) -> str:
@@ -49,11 +50,13 @@ def tool_header(tool_name: str) -> str:
 
 def tool_args(args: dict, indent: int = 2) -> str:
     """Format tool arguments with dimmed color."""
+    if not args:
+        return ""
+
     lines = []
     indent_str = " " * indent
     for key, value in args.items():
-        # Truncate long values
-        value_str = str(value)
+        value_str = value if isinstance(value, str) else str(value)
         if len(value_str) > 100:
             value_str = value_str[:100] + "..."
         lines.append(f"{indent_str}{COLORS['dim']}{key}:{COLORS['reset']} {value_str}")
@@ -62,21 +65,21 @@ def tool_args(args: dict, indent: int = 2) -> str:
 
 def tool_output(output: str, indent: int = 2, max_lines: int = 5) -> str:
     """Format tool output with dimmed color, truncated."""
-    lines = output.split("\n")
-    if len(lines) > max_lines:
-        lines = lines[:max_lines] + [f"... ({len(lines) - max_lines} more lines)"]
+    if not output:
+        return ""
 
     indent_str = " " * indent
-    formatted_lines = [f"{indent_str}{COLORS['dim']}{line}{COLORS['reset']}" for line in lines]
-    return "\n".join(formatted_lines)
+    lines = []
 
+    # Use split with maxsplit to avoid creating full list for large outputs
+    parts = output.split("\n", max_lines + 1)
+    for i, line in enumerate(parts[:max_lines]):
+        lines.append(f"{indent_str}{COLORS['dim']}{line}{COLORS['reset']}")
 
-def print_tool_call(tool_name: str, args: dict, output: str = None):
-    """Print a formatted tool call with color."""
-    print(tool_header(tool_name))
-    print(tool_args(args))
-    if output:
-        print(tool_output(output))
+    if len(parts) > max_lines:
+        lines.append(f"{indent_str}{COLORS['dim']}... (more lines){COLORS['reset']}")
+
+    return "\n".join(lines)
 
 
 def round_header(round_num: int) -> str:

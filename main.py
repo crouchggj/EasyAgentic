@@ -3,10 +3,7 @@ import json
 from openai import OpenAI
 
 from tools import ToolRegistry, TodoManager, setup_registry, SubAgent
-from tools.colors import (
-    COLORS, TOOL_COLORS, colorize, tool_header, tool_args,
-    tool_output, print_tool_call, round_header
-)
+from tools.colors import COLORS, colorize, tool_header, tool_args, tool_output, round_header
 
 # Configuration
 OPENAI_URL = os.environ.get("OPENAI_URL", "https://api.openai.com/v1")
@@ -31,6 +28,7 @@ class AgentLoop:
         self.todo_manager = todo_manager
         self.subagent = subagent
         self.todo_skip_count = 0
+        self.round_num = 0
 
     def run(self, query: str) -> str:
         """Run the agent loop for a query."""
@@ -56,7 +54,10 @@ class AgentLoop:
 
             # Print assistant content if present
             if message.content:
-                print(f"\n{COLORS['dim']}[thinking]{COLORS['reset']} {message.content[:200]}...")
+                content_preview = message.content[:200]
+                if len(message.content) > 200:
+                    content_preview += "..."
+                print(f"\n{COLORS['dim']}[thinking]{COLORS['reset']} {content_preview}")
 
             messages.append({
                 "role": "assistant",
@@ -126,11 +127,11 @@ def main():
                 break
 
             result = agent.run(query)
-            print(f"\n{COLORS['bright_blue']}{COLORS['bold']}Final Answer:{COLORS['reset']}")
+            print(colorize("\nFinal Answer:", "bright_blue", styles=["bold"]))
             if result:
                 print(result)
         except KeyboardInterrupt:
-            print(f"\n{COLORS['bright_cyan']}Goodbye!{COLORS['reset']}")
+            print(colorize("\nGoodbye!", "bright_cyan"))
             break
         except Exception as e:
             print(colorize(f"\nError: {e}", "bright_red"))

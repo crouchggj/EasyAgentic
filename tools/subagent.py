@@ -7,13 +7,18 @@ from .base import ToolRegistry
 from .bash import BASH_TOOL, handle_bash
 from .read_file import READ_FILE_TOOL, handle_read_file
 from .todo import TODO_TOOL, TodoManager, create_todo_handler
-from .colors import COLORS, tool_header, tool_args, tool_output, round_header
+from .colors import COLORS, colorize, tool_header, tool_args, tool_output, round_header
 
 
 SUBAGENT_SYSTEM = """You are a specialized subagent tasked with completing a specific subtask.
 You have access to bash commands, file reading, and todo management.
 Focus on completing the assigned task efficiently and return a clear summary of your work.
 You cannot spawn additional subagents."""
+
+
+def _subagent_prefix() -> str:
+    """Return the green prefix for subagent output."""
+    return colorize("│", "green")
 
 
 class SubAgent:
@@ -38,14 +43,17 @@ class SubAgent:
     def run(self, prompt: str) -> str:
         """Run subagent loop and return final text result."""
         # Print subagent header
-        print(f"\n{COLORS['green']}{COLORS['bold']}┌─ SubAgent Started ─┐{COLORS['reset']}")
-        print(f"{COLORS['dim']}  Prompt: {prompt[:100]}...{COLORS['reset']}")
+        print(colorize("\n┌─ SubAgent Started ─┐", "green", styles=["bold"]))
+        prompt_preview = prompt[:100]
+        if len(prompt) > 100:
+            prompt_preview += "..."
+        print(colorize(f"  Prompt: {prompt_preview}", "dim"))
 
         messages = [{"role": "system", "content": SUBAGENT_SYSTEM},
                     {"role": "user", "content": prompt}]
 
         for iteration in range(self.MAX_ITERATIONS):
-            print(f"{COLORS['green']}│{COLORS['reset']} {round_header(iteration + 1).strip()}")
+            print(f"{_subagent_prefix()} {round_header(iteration + 1).strip()}")
 
             response = self.client.chat.completions.create(
                 model=self.model,
@@ -58,7 +66,10 @@ class SubAgent:
 
             # Print thinking preview
             if message.content:
-                print(f"{COLORS['green']}│{COLORS['reset']} {COLORS['dim']}[thinking] {message.content[:150]}...{COLORS['reset']}")
+                content_preview = message.content[:150]
+                if len(message.content) > 150:
+                    content_preview += "..."
+                print(f"{_subagent_prefix()} {colorize('[thinking]', 'dim')} {content_preview}")
 
             messages.append({
                 "role": "assistant",
@@ -69,8 +80,11 @@ class SubAgent:
             if not message.tool_calls:
                 # Return final text content
                 result = message.content or "(no summary)"
-                print(f"{COLORS['green']}{COLORS['bold']}└─ SubAgent Done ─┘{COLORS['reset']}")
-                print(f"{COLORS['dim']}  Result: {result[:100]}...{COLORS['reset']}")
+                print(colorize("└─ SubAgent Done ─┘", "green", styles=["bold"]))
+                result_preview = result[:100]
+                if len(result) > 100:
+                    result_preview += "..."
+                print(colorize(f"  Result: {result_preview}", "dim"))
                 return result
 
             # Execute all tool calls
@@ -79,10 +93,11 @@ class SubAgent:
                 tool_name = tool_call.function.name
 
                 # Print tool call with color (indented for subagent)
-                print(f"{COLORS['green']}│{COLORS['reset']}")
-                print(f"{COLORS['green']}│{COLORS['reset']} {tool_header(tool_name).strip()}")
+                print(f"{_subagent_prefix()}")
+                print(f"{_subagent_prefix()} {tool_header(tool_name).strip()}")
                 for line in tool_args(args).split("\n"):
-                    print(f"{COLORS['green']}│{COLORS['reset']}   {line}")
+                    if line:
+                        print(f"{_subagent_prefix()}   {line}")
 
                 # Execute and get output
                 output = self.registry.execute(tool_name, args)
@@ -90,7 +105,8 @@ class SubAgent:
 
                 # Print output preview (indented)
                 for line in tool_output(output, max_lines=5).split("\n"):
-                    print(f"{COLORS['green']}│{COLORS['reset']}   {line}")
+                    if line:
+                        print(f"{_subagent_prefix()}   {line}")
 
                 messages.append({
                     "role": "tool",
@@ -98,5 +114,5 @@ class SubAgent:
                     "content": output,
                 })
 
-        print(f"{COLORS['green']}{COLORS['bold']}└─ SubAgent Limit Reached ─┘{COLORS['reset']}")
+        print(colorize("└─ SubAgent Limit Reached ─┘", "green", styles=["bold"]))
         return "(subagent reached iteration limit)"

@@ -6,7 +6,7 @@ from .read_file import READ_FILE_TOOL, handle_read_file
 from .todo import TODO_TOOL, TodoManager, create_todo_handler
 from .task import TASK_TOOL, create_task_handler
 from .subagent import SubAgent, SUBAGENT_SYSTEM
-from .colors import COLORS, TOOL_COLORS, colorize, tool_header, tool_args, tool_output, print_tool_call, round_header
+from .colors import COLORS, TOOL_COLORS, colorize, tool_header, tool_args, tool_output, round_header
 
 
 def setup_registry(todo_manager: TodoManager, subagent_runner=None) -> ToolRegistry:
@@ -47,6 +47,5 @@ __all__ = [
     "tool_header",
     "tool_args",
     "tool_output",
-    "print_tool_call",
     "round_header",
 ]
