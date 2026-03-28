@@ -3,6 +3,10 @@ import json
 from openai import OpenAI
 
 from tools import ToolRegistry, TodoManager, setup_registry, SubAgent
+from tools.colors import (
+    COLORS, TOOL_COLORS, colorize, tool_header, tool_args,
+    tool_output, print_tool_call, round_header
+)
 
 # Configuration
 OPENAI_URL = os.environ.get("OPENAI_URL", "https://api.openai.com/v1")
@@ -31,12 +35,16 @@ class AgentLoop:
     def run(self, query: str) -> str:
         """Run the agent loop for a query."""
         self.todo_skip_count = 0
+        self.round_num = 0
         messages = [
             {"role": "system", "content": SYSTEM},
             {"role": "user", "content": query}
         ]
 
         while True:
+            self.round_num += 1
+            print(round_header(self.round_num))
+
             response = self.client.chat.completions.create(
                 model=MODEL,
                 messages=messages,
@@ -45,6 +53,11 @@ class AgentLoop:
             )
 
             message = response.choices[0].message
+
+            # Print assistant content if present
+            if message.content:
+                print(f"\n{COLORS['dim']}[thinking]{COLORS['reset']} {message.content[:200]}...")
+
             messages.append({
                 "role": "assistant",
                 "content": message.content,
@@ -63,13 +76,25 @@ class AgentLoop:
                 if self.todo_skip_count >= TODO_REMINDER_THRESHOLD and self.todo_manager.items:
                     reminder = f"\n[REMINDER] You have active tasks but haven't updated todo for {self.todo_skip_count} rounds.\n{self.todo_manager.render()}\nConsider calling todo to track progress."
                     messages.append({"role": "user", "content": reminder})
+                    print(colorize(f"[REMINDER: {self.todo_skip_count} rounds without todo]", "bright_yellow"))
                     self.todo_skip_count = 0
                     continue
 
             # Execute all tool calls
             for tool_call in message.tool_calls:
                 args = json.loads(tool_call.function.arguments)
-                output = self.registry.execute(tool_call.function.name, args)
+                tool_name = tool_call.function.name
+
+                # Print tool call with color
+                print(tool_header(tool_name))
+                print(tool_args(args))
+
+                # Execute and get output
+                output = self.registry.execute(tool_name, args)
+
+                # Print output preview
+                print(tool_output(output, max_lines=8))
+
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tool_call.id,
@@ -88,27 +113,27 @@ def main():
 
     agent = AgentLoop(client, registry, todo_manager, subagent)
 
-    print("Simple Agent - Type 'quit' to exit")
-    print("-" * 40)
+    print(colorize("Simple Agent", "bright_cyan") + colorize(" - Type 'quit' to exit", "dim"))
+    print(colorize("-" * 40, "dim"))
 
     while True:
         try:
-            query = input("\nYou: ").strip()
+            query = input(colorize("\nYou: ", "bright_green"))
             if not query:
                 continue
             if query.lower() in ["quit", "exit", "q"]:
-                print("Goodbye!")
+                print(colorize("Goodbye!", "bright_cyan"))
                 break
 
-            print("\nAgent: ", end="")
             result = agent.run(query)
+            print(f"\n{COLORS['bright_blue']}{COLORS['bold']}Final Answer:{COLORS['reset']}")
             if result:
                 print(result)
         except KeyboardInterrupt:
-            print("\n\nGoodbye!")
+            print(f"\n{COLORS['bright_cyan']}Goodbye!{COLORS['reset']}")
             break
         except Exception as e:
-            print(f"\nError: {e}")
+            print(colorize(f"\nError: {e}", "bright_red"))
 
 
 if __name__ == "__main__":
