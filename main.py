@@ -2,7 +2,7 @@ import os
 import json
 from openai import OpenAI
 
-from tools import ToolRegistry, TodoManager, setup_registry, SubAgent
+from tools import ToolRegistry, TodoManager, setup_registry, SubAgent, SkillLoader
 from tools.colors import COLORS, colorize, tool_header, tool_args, tool_output, round_header
 
 # Configuration
@@ -10,32 +10,45 @@ OPENAI_URL = os.environ.get("OPENAI_URL", "https://api.openai.com/v1")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 MODEL = os.environ.get("MODEL", "gpt-4o")
 TODO_REMINDER_THRESHOLD = 3
+SKILLS_DIR = os.environ.get("SKILLS_DIR", "skills")
 
-# System prompt
-SYSTEM = """You are a helpful AI assistant with access to bash commands, file reading, todo management, and task delegation.
-You can execute shell commands, read files, track tasks, and spawn subagents for complex subtasks.
-Use the task tool to delegate complex subtasks to specialized subagents.
+
+def build_system_prompt(skill_loader: SkillLoader) -> str:
+    """Build system prompt with skills summary (Layer 1)."""
+    base = """You are a helpful AI assistant with access to bash commands, file reading, todo management, task delegation, and skills.
+You can execute shell commands, read files, track tasks, spawn subagents for complex subtasks, and load specialized skills.
 Always be careful when running commands and explain what you're doing.
-Use the todo tool to track progress on multi-step tasks."""
+Use the todo tool to track progress on multi-step tasks.
+Use the skill tool to load specialized workflows when appropriate."""
+
+    # Layer 1: Add skills summary to system prompt
+    skills_summary = skill_loader.get_skills_summary()
+    if skills_summary:
+        base += f"\n\n{skills_summary}"
+
+    return base
 
 
 class AgentLoop:
     """Agent loop with decoupled tool execution and subagent support."""
 
-    def __init__(self, client: OpenAI, registry: ToolRegistry, todo_manager: TodoManager, subagent: SubAgent):
+    def __init__(self, client: OpenAI, registry: ToolRegistry, todo_manager: TodoManager,
+                 subagent: SubAgent, skill_loader: SkillLoader):
         self.client = client
         self.registry = registry
         self.todo_manager = todo_manager
         self.subagent = subagent
+        self.skill_loader = skill_loader
         self.todo_skip_count = 0
         self.round_num = 0
+        self.system_prompt = build_system_prompt(skill_loader)
 
     def run(self, query: str) -> str:
         """Run the agent loop for a query."""
         self.todo_skip_count = 0
         self.round_num = 0
         messages = [
-            {"role": "system", "content": SYSTEM},
+            {"role": "system", "content": self.system_prompt},
             {"role": "user", "content": query}
         ]
 
@@ -108,11 +121,17 @@ def main():
     client = OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_URL)
     todo_manager = TodoManager()
     subagent = SubAgent(client, MODEL)
+    skill_loader = SkillLoader(SKILLS_DIR)
 
-    # Parent registry includes task tool
-    registry = setup_registry(todo_manager, subagent_runner=subagent.run)
+    # Print loaded skills
+    skills = skill_loader.get_skill_names()
+    if skills:
+        print(colorize(f"Loaded {len(skills)} skills: ", "cyan") + colorize(", ".join(skills), "dim"))
 
-    agent = AgentLoop(client, registry, todo_manager, subagent)
+    # Parent registry includes task and skill tools
+    registry = setup_registry(todo_manager, subagent_runner=subagent.run, skill_loader=skill_loader)
+
+    agent = AgentLoop(client, registry, todo_manager, subagent, skill_loader)
 
     print(colorize("Simple Agent", "bright_cyan") + colorize(" - Type 'quit' to exit", "dim"))
     print(colorize("-" * 40, "dim"))

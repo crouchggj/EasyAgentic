@@ -31,6 +31,7 @@ TOOL_COLORS = {
     "read_file": COLORS["cyan"],
     "todo": COLORS["magenta"],
     "task": COLORS["green"],
+    "skill": COLORS["bright_magenta"],
     "default": COLORS["blue"],
 }
 
