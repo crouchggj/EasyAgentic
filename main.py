@@ -1,9 +1,8 @@
 import os
 import json
 from openai import OpenAI
-from pathlib import Path
 
-from tools import ToolRegistry, TodoManager, setup_registry
+from tools import ToolRegistry, TodoManager, setup_registry, SubAgent
 
 # Configuration
 OPENAI_URL = os.environ.get("OPENAI_URL", "https://api.openai.com/v1")
@@ -12,19 +11,21 @@ MODEL = os.environ.get("MODEL", "gpt-4o")
 TODO_REMINDER_THRESHOLD = 3
 
 # System prompt
-SYSTEM = """You are a helpful AI assistant with access to bash commands, file reading, and todo management.
-You can execute shell commands, read files, and track tasks with the todo tool.
+SYSTEM = """You are a helpful AI assistant with access to bash commands, file reading, todo management, and task delegation.
+You can execute shell commands, read files, track tasks, and spawn subagents for complex subtasks.
+Use the task tool to delegate complex subtasks to specialized subagents.
 Always be careful when running commands and explain what you're doing.
 Use the todo tool to track progress on multi-step tasks."""
 
 
 class AgentLoop:
-    """Agent loop with decoupled tool execution."""
+    """Agent loop with decoupled tool execution and subagent support."""
 
-    def __init__(self, client: OpenAI, registry: ToolRegistry, todo_manager: TodoManager):
+    def __init__(self, client: OpenAI, registry: ToolRegistry, todo_manager: TodoManager, subagent: SubAgent):
         self.client = client
         self.registry = registry
         self.todo_manager = todo_manager
+        self.subagent = subagent
         self.todo_skip_count = 0
 
     def run(self, query: str) -> str:
@@ -80,8 +81,12 @@ def main():
     """Main entry point."""
     client = OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_URL)
     todo_manager = TodoManager()
-    registry = setup_registry(todo_manager)
-    agent = AgentLoop(client, registry, todo_manager)
+    subagent = SubAgent(client, MODEL)
+
+    # Parent registry includes task tool
+    registry = setup_registry(todo_manager, subagent_runner=subagent.run)
+
+    agent = AgentLoop(client, registry, todo_manager, subagent)
 
     print("Simple Agent - Type 'quit' to exit")
     print("-" * 40)
