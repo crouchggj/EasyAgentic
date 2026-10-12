@@ -1,9 +1,7 @@
 """Agent Teams - Persistent multi-agent collaboration with message bus."""
 
-import os
+import math
 import re
-import tempfile
-import fcntl
 from contextlib import contextmanager
 import json
 import time
@@ -12,6 +10,10 @@ from pathlib import Path
 from typing import Dict, List, Callable
 from dataclasses import dataclass
 from openai import OpenAI
+
+from agent_runtime.config import Settings
+from agent_runtime.execution import Task, TaskStopped, current_task, task_scope, completion, tool_results
+from agent_runtime.storage import file_lock, atomic_json, SessionStore, repair_history, jsonable
 
 from .base import ToolRegistry
 from .bash import BASH_TOOL, handle_bash
@@ -34,6 +36,8 @@ class MessageBus:
     def __init__(self, team_dir: Path):
         self.dir = team_dir / "inbox"
         self.dir.mkdir(parents=True, exist_ok=True)
+        self._contexts = {}
+        self._context_lock = threading.Lock()
 
     @staticmethod
     def validate_name(name: str):
@@ -44,12 +48,11 @@ class MessageBus:
     def _inbox_lock(self, name: str):
         self.validate_name(name)
         # File locks also protect separate MessageBus instances/processes.
-        with (self.dir / f"{name}.lock").open("a") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
-            try:
-                yield self.dir / f"{name}.jsonl"
-            finally:
-                fcntl.flock(lock, fcntl.LOCK_UN)
+        with file_lock(self.dir / f"{name}.lock"):
+            path = self.dir / f"{name}.jsonl"
+            if path.is_symlink():
+                raise ValueError("Inbox path may not be a symlink")
+            yield path
 
     def send(self, sender: str, to: str, content: str,
              msg_type: str = "message", extra: dict = None) -> str:
@@ -65,6 +68,9 @@ class MessageBus:
 
         self.validate_name(sender)
         with self._inbox_lock(to) as inbox_path:
+            if msg_type == "message":
+                with self._context_lock:
+                    self._contexts[to] = current_task.get()
             with inbox_path.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(msg, ensure_ascii=False) + "\n")
 
@@ -79,6 +85,10 @@ class MessageBus:
             msgs = [json.loads(line) for line in lines if line.strip()]
             inbox_path.write_text("", encoding="utf-8")
         return json.dumps(msgs, indent=2, ensure_ascii=False)
+
+    def take_context(self, name):
+        with self._context_lock:
+            return self._contexts.pop(name, None)
 
     def broadcast(self, sender: str, content: str,
                   msg_type: str = "broadcast", members: List[str] = None) -> str:
@@ -116,7 +126,9 @@ class TeammateManager:
 
     MAX_ITERATIONS = 50
 
-    def __init__(self, team_dir: Path, client: OpenAI, model: str, bus: MessageBus):
+    def __init__(self, team_dir: Path, client: OpenAI, model: str, bus: MessageBus, settings=None):
+        self.settings = settings or Settings.from_env()
+        self.MAX_ITERATIONS = self.settings.max_rounds
         self.team_dir = team_dir
         self.client = client
         self.model = model
@@ -135,6 +147,7 @@ class TeammateManager:
 
         # Track teammates
         self.teammates: Dict[str, Teammate] = {}
+        self._contexts = {}
 
     def _load_config(self) -> dict:
         """Load or create team config."""
@@ -143,16 +156,12 @@ class TeammateManager:
         return {"members": []}
 
     def _save_config(self):
-        """Serialize writes and atomically replace the configuration."""
-        with self._lock:
-            fd, path = tempfile.mkstemp(dir=self.team_dir, prefix="config-", suffix=".tmp")
-            try:
-                with os.fdopen(fd, "w", encoding="utf-8") as stream:
-                    json.dump(self.config, stream, indent=2, ensure_ascii=False)
-                os.replace(path, self.config_path)
-            finally:
-                if os.path.exists(path):
-                    os.unlink(path)
+        with self._lock, file_lock(self.config_path.with_suffix(".lock")):
+            atomic_json(self.config_path, self.config)
+
+    def _store(self, name):
+        self.bus.validate_name(name)
+        return SessionStore(self.team_dir / "tasks" / f"{name}.json")
 
     def _setup_teammate_registry(self, name: str) -> ToolRegistry:
         """Setup registry with teammate tools (bash, read_file, todo)."""
@@ -162,6 +171,7 @@ class TeammateManager:
         # Each teammate has its own todo manager
         todo_manager = TodoManager()
         registry.register("todo", TODO_TOOL, create_todo_handler(todo_manager))
+        registry.todo_manager = todo_manager
         registry.register("send", SEND_TOOL, create_send_handler(self.bus, name))
         registry.register("read_inbox", READ_INBOX_TOOL, create_read_inbox_handler(self.bus, name))
         return registry
@@ -171,63 +181,101 @@ class TeammateManager:
         print(colorize(f"\n[Team] {name} ({role}) started", "green"))
 
         registry = self._setup_teammate_registry(name)
-        messages = [{"role": "user", "content": prompt}]
+        store = self._store(name)
+        snapshot = store.load() if self._contexts[name][1] else None
+        messages = repair_history(snapshot["messages"]) if snapshot else []
+        if snapshot:
+            messages.append({"role": "user", "content": "Resume from the checkpoint. Do not replay completed tools; inspect interrupted actions first."})
+        else:
+            messages = [{"role": "user", "content": prompt}]
+        if not messages or messages[0]["role"] != "system":
+            messages.insert(0, {"role": "system", "content": TEAMMATE_SYSTEM})
+        todo = registry.todo_manager
+        if snapshot:
+            todo.update(snapshot.get("todo", []))
         idle = False
         iterations = 0
+        task = self._contexts[name][0]
+        def save(status):
+            store.save(messages, todo.items, status, task.task_id)
+        save("running")
         try:
-            while not stop_event.is_set() and iterations < self.MAX_ITERATIONS:
+            while not stop_event.is_set():
                 inbox = self.bus.read_inbox(name)
                 if inbox != "[]":
+                    parent = self.bus.take_context(name)
+                    messages = repair_history(jsonable(messages))
                     messages.append({"role": "user", "content": f"<inbox>{inbox}</inbox>"})
                     if idle:
                         iterations = 0
+                        task = parent.child(stop_event) if parent else Task(self.settings, stop=stop_event)
+                        self._update_status(name, "working", task_id=task.task_id, result=None, outcome=None)
                     idle = False
+                    save("running")
                 if idle:
                     stop_event.wait(0.1)
                     continue
+                if iterations >= min(self.MAX_ITERATIONS, self.settings.max_rounds):
+                    break
                 iterations += 1
                 self._update_status(name, "working")
                 try:
-                    response = self.client.chat.completions.create(
-                        model=self.model,
-                        messages=[{"role": "system", "content": TEAMMATE_SYSTEM}] + messages,
-                        tools=registry.get_definitions(), max_tokens=4000,
-                    )
-                    message = response.choices[0].message
-                    messages.append({"role": "assistant", "content": message.content,
-                                     "tool_calls": message.tool_calls})
-                    if not message.tool_calls:
-                        self.bus.send(name, "lead", message.content or "(no summary)", "result")
-                        idle = True
-                        self._update_status(name, "idle")
-                        continue
-                    for tool_call in message.tool_calls:
-                        output = registry.execute_json(tool_call.function.name, tool_call.function.arguments)
-                        messages.append({"role": "tool", "tool_call_id": tool_call.id,
-                                         "content": output[:10000]})
+                    with task_scope(task):
+                        task.check()
+                        response = completion(self.client, self.model,
+                                              messages,
+                                              registry, task)
+                        message = response.choices[0].message
+                        messages.append(jsonable({"role": "assistant", "content": message.content,
+                                                  "tool_calls": message.tool_calls}))
+                        save("running")
+                        if not message.tool_calls:
+                            result = message.content or "(no summary)"
+                            save("completed")
+                            self.bus.send(name, "lead", result, "result", {"task_id": task.task_id})
+                            self._update_status(name, "idle", result=result, outcome="completed")
+                            idle = True
+                            continue
+                        def save_result(result):
+                            messages.append(result)
+                            save("running")
+                        tool_results(message, registry, task, save_result)
+                        task.check()
+                except TaskStopped as exc:
+                    self._update_status(name, "shutdown", outcome="stopped", result=str(exc))
+                    self.bus.send(name, "lead", f"Task stopped: {exc}", "error", {"task_id": task.task_id})
+                    save("stopped")
+                    break
                 except Exception as exc:
-                    self.bus.send(name, "lead", f"Teammate error: {exc}", "error")
-                    # Wait for fresh instructions rather than retrying a broken history.
-                    messages = []
+                    # Do not leak API response bodies or request data into logs.
+                    error = f"Teammate error ({type(exc).__name__}); resume after resolving the cause."
+                    self.bus.send(name, "lead", error, "error", {"task_id": task.task_id})
+                    self._update_status(name, "idle", outcome="error", result=error)
+                    save("error")
                     idle = True
-                    self._update_status(name, "idle")
-            if not stop_event.is_set():
-                self.bus.send(name, "lead", "(teammate reached iteration limit)", "error")
+            if not stop_event.is_set() and not idle and iterations >= min(self.MAX_ITERATIONS, self.settings.max_rounds):
+                result = "(teammate reached iteration limit)"
+                self.bus.send(name, "lead", result, "error", {"task_id": task.task_id})
+                self._update_status(name, "shutdown", outcome="limited", result=result)
+                save("limited")
         finally:
             self._update_status(name, "shutdown")
+            if stop_event.is_set():
+                save("cancelled")
             print(colorize(f"\n[Team] {name} shutdown", "yellow"))
 
-    def _update_status(self, name: str, status: str):
+    def _update_status(self, name: str, status: str, **updates):
         with self._lock:
             for member in self.config["members"]:
                 if member["name"] == name:
                     member["status"] = status
+                    member.update(updates)
                     break
             if name in self.teammates:
                 self.teammates[name].status = status
             self._save_config()
 
-    def spawn(self, name: str, role: str, prompt: str) -> str:
+    def spawn(self, name: str, role: str, prompt: str, restore=False) -> str:
         self.bus.validate_name(name)
         if name == "lead":
             return "Error: 'lead' is reserved for the main agent"
@@ -235,23 +283,33 @@ class TeammateManager:
             previous = self.teammates.get(name)
             if previous and previous.thread.is_alive():
                 return f"Error: Teammate '{name}' already exists"
-            self.config["members"] = [m for m in self.config["members"] if m["name"] != name]
-            self.config["members"].append({"name": name, "role": role, "status": "working"})
-            self._save_config()
+            if sum(t.thread.is_alive() for t in self.teammates.values()) >= self.settings.max_teammates:
+                return "Error: teammate capacity reached"
+            parent = current_task.get()
             stop_event = threading.Event()
+            task = parent.child(stop_event) if parent else Task(self.settings, stop=stop_event)
+            self._contexts[name] = (task, restore)
+            self.config["members"] = [m for m in self.config["members"] if m["name"] != name]
+            self.config["members"].append({"name": name, "role": role, "prompt": prompt,
+                                            "status": "working", "task_id": task.task_id,
+                                            "result": None, "outcome": None})
+            self._save_config()
             thread = threading.Thread(target=self._teammate_loop,
                                       args=(name, role, prompt, stop_event), daemon=True)
             self.teammates[name] = Teammate(name, role, "working", thread, stop_event)
             thread.start()
-        return f"Spawned teammate '{name}' (role: {role})"
+        return json.dumps({"name": name, "role": role, "task_id": task.task_id, "status": "working"})
 
     def shutdown(self, name: str) -> str:
         with self._lock:
             teammate = self.teammates.get(name)
             if teammate is None:
                 return f"Error: Teammate '{name}' not found"
+            if not teammate.thread.is_alive():
+                return f"Teammate '{name}' is already stopped"
             teammate.stop_event.set()
-        teammate.thread.join(timeout=2)
+            self._update_status(name, "stopping", outcome="cancelled")
+        teammate.thread.join(timeout=self.settings.api_timeout + 1)
         return f"Shutdown requested for teammate '{name}'"
 
     def shutdown_all(self):
@@ -261,6 +319,42 @@ class TeammateManager:
                 teammate.stop_event.set()
         for name in names:
             self.shutdown(name)
+
+    def resume(self, name):
+        self.bus.validate_name(name)
+        with self._lock:
+            member = next((dict(m) for m in self.config["members"] if m["name"] == name), None)
+        if not member or not self._store(name).load():
+            return "Error: no checkpoint for teammate"
+        return self.spawn(name, member["role"], member.get("prompt", "Resume saved task"), restore=True)
+
+    def has_pending(self):
+        return any(m["status"] in ("working", "stopping") for m in self.list_members())
+
+    def wait(self, name, timeout=30.0):
+        self.bus.validate_name(name)
+        timeout = float(timeout)
+        if timeout < 0 or not math.isfinite(timeout):
+            raise ValueError("timeout must be finite and nonnegative")
+        timeout = min(timeout, self.settings.team_wait_timeout)
+        deadline = time.monotonic() + timeout
+        while True:
+            task = current_task.get()
+            if task:
+                task.check()
+            member = next((m for m in self.list_members() if m["name"] == name), None)
+            if not member:
+                return json.dumps({"error": "unknown teammate", "name": name})
+            if member["status"] not in ("working", "stopping") or time.monotonic() >= deadline:
+                return json.dumps(member)
+            time.sleep(min(0.05, max(0, deadline-time.monotonic())))
+
+    def wait_all(self, timeout):
+        deadline = time.monotonic() + min(timeout, self.settings.team_wait_timeout)
+        for member in self.list_members():
+            if member["status"] in ("working", "stopping"):
+                self.wait(member["name"], max(0, deadline-time.monotonic()))
+        return self.list_members()
 
     def list_members(self) -> List[dict]:
         with self._lock:

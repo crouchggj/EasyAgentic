@@ -1,5 +1,7 @@
 """Tools package."""
 
+import json
+
 from .base import Tool, ToolRegistry
 from .bash import BASH_TOOL, handle_bash
 from .read_file import READ_FILE_TOOL, handle_read_file
@@ -42,6 +44,16 @@ def setup_registry(todo_manager: TodoManager, subagent_runner=None, skill_loader
         registry.register("skill", SKILL_TOOL, create_skill_handler(skill_loader))
     if team_manager:
         registry.register("spawn", SPAWN_TOOL, create_spawn_handler(team_manager))
+        controls = {
+            "team_status": ("List teammate status, task IDs, outcomes and results.", {}, [], lambda a: json.dumps(team_manager.list_members())),
+            "team_wait": ("Wait for a teammate; returns status and result without draining inbox.", {"name": {"type": "string"}, "timeout": {"type": "number", "minimum": 0}}, ["name"], lambda a: team_manager.wait(a["name"], a.get("timeout", 30))),
+            "team_cancel": ("Cancel a teammate and stop its current work.", {"name": {"type": "string"}}, ["name"], lambda a: team_manager.shutdown(a["name"])),
+            "team_resume": ("Explicitly resume a stopped teammate from a checkpoint; never replay completed tools.", {"name": {"type": "string"}}, ["name"], lambda a: team_manager.resume(a["name"])),
+        }
+        for name, (description, properties, required, handler) in controls.items():
+            registry.register(name, {"type": "function", "function": {"name": name,
+                              "description": description, "parameters": {"type": "object",
+                              "properties": properties, "required": required}}}, handler)
     if bus:
         registry.register("send", SEND_TOOL, create_send_handler(bus, agent_name))
         registry.register("read_inbox", READ_INBOX_TOOL, create_read_inbox_handler(bus, agent_name))

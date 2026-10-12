@@ -3,6 +3,7 @@
 import json
 from typing import Callable, Dict, List
 from dataclasses import dataclass
+from agent_runtime.execution import TaskStopped
 
 
 @dataclass
@@ -34,7 +35,12 @@ class ToolRegistry:
         try:
             if not isinstance(args, dict):
                 raise ValueError("Tool arguments must be a JSON object")
-            return self._tools[name].handler(args)
+            result = self._tools[name].handler(args)
+            if not isinstance(result, str):
+                raise TypeError("Tool handlers must return strings")
+            return result
+        except TaskStopped:
+            raise
         except Exception as exc:
             return f"Error executing tool '{name}': {exc}"
 

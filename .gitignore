@@ -1,3 +1,11 @@
 .idea/
 __pycache__/
 test/
+
+.venv/
+.venv*/
+.team/
+.easyagentic/
+.env
+.env.*
+!.env.example

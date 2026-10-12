@@ -1,12 +1,14 @@
 """Subagent implementation."""
 
 from openai import OpenAI
+from agent_runtime.config import Settings
+from agent_runtime.execution import Task, TaskStopped, current_task, task_scope, completion, tool_results
+from agent_runtime.storage import jsonable
 
 from .base import ToolRegistry
 from .bash import BASH_TOOL, handle_bash
 from .read_file import READ_FILE_TOOL, handle_read_file
 from .todo import TODO_TOOL, TodoManager, create_todo_handler
-from .colors import COLORS, colorize, tool_header, tool_output, round_header
 
 
 SUBAGENT_SYSTEM = """You are a specialized subagent tasked with completing a specific subtask.
@@ -15,17 +17,14 @@ Focus on completing the assigned task efficiently and return a clear summary of 
 You cannot spawn additional subagents."""
 
 
-def _subagent_prefix() -> str:
-    """Return the green prefix for subagent output."""
-    return colorize("│", "green")
-
-
 class SubAgent:
     """Subagent with limited tools (no task tool to prevent recursion)."""
 
     MAX_ITERATIONS = 30
 
-    def __init__(self, client: OpenAI, model: str):
+    def __init__(self, client: OpenAI, model: str, settings=None):
+        self.settings = settings or Settings.from_env()
+        self.MAX_ITERATIONS = self.settings.subagent_rounds
         self.client = client
         self.model = model
         self.todo_manager = TodoManager()
@@ -40,75 +39,23 @@ class SubAgent:
         return registry
 
     def run(self, prompt: str) -> str:
-        """Run subagent loop and return final text result."""
+        """Children share their parent's budget and deadline."""
+        parent = current_task.get()
+        task = parent.child() if parent else Task(self.settings)
         self.todo_manager.items = []
-        # Print subagent header
-        print(colorize("\n┌─ SubAgent Started ─┐", "green", styles=["bold"]))
-        prompt_preview = prompt[:100]
-        if len(prompt) > 100:
-            prompt_preview += "..."
-        print(colorize(f"  Prompt: {prompt_preview}", "dim"))
-
         messages = [{"role": "system", "content": SUBAGENT_SYSTEM},
                     {"role": "user", "content": prompt}]
-
-        for iteration in range(self.MAX_ITERATIONS):
-            print(f"{_subagent_prefix()} {round_header(iteration + 1).strip()}")
-
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                tools=self.registry.get_definitions(),
-                max_tokens=8000,
-            )
-
-            message = response.choices[0].message
-
-            # Print thinking preview
-            if message.content:
-                content_preview = message.content[:150]
-                if len(message.content) > 150:
-                    content_preview += "..."
-                print(f"{_subagent_prefix()} {colorize('[thinking]', 'dim')} {content_preview}")
-
-            messages.append({
-                "role": "assistant",
-                "content": message.content,
-                "tool_calls": message.tool_calls
-            })
-
-            if not message.tool_calls:
-                # Return final text content
-                result = message.content or "(no summary)"
-                print(colorize("└─ SubAgent Done ─┘", "green", styles=["bold"]))
-                result_preview = result[:100]
-                if len(result) > 100:
-                    result_preview += "..."
-                print(colorize(f"  Result: {result_preview}", "dim"))
-                return result
-
-            # Execute all tool calls
-            for tool_call in message.tool_calls:
-                tool_name = tool_call.function.name
-
-                # Print tool call with color (indented for subagent)
-                print(f"{_subagent_prefix()}")
-                print(f"{_subagent_prefix()} {tool_header(tool_name).strip()}")
-
-                # Execute and get output
-                output = self.registry.execute_json(tool_name, tool_call.function.arguments)
-                output = output[:50000] if len(output) > 50000 else output
-
-                # Print output preview (indented)
-                for line in tool_output(output, max_lines=5).split("\n"):
-                    if line:
-                        print(f"{_subagent_prefix()}   {line}")
-
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": output,
-                })
-
-        print(colorize("└─ SubAgent Limit Reached ─┘", "green", styles=["bold"]))
-        return "(subagent reached iteration limit)"
+        with task_scope(task):
+            try:
+                for _ in range(min(self.MAX_ITERATIONS, self.settings.subagent_rounds)):
+                    response = completion(self.client, self.model, messages, self.registry, task)
+                    message = response.choices[0].message
+                    messages.append(jsonable({"role": "assistant", "content": message.content,
+                                              "tool_calls": message.tool_calls}))
+                    if not message.tool_calls:
+                        return message.content or "(no summary)"
+                    messages.extend(tool_results(message, self.registry, task))
+                    task.check()
+                return "(subagent reached iteration limit)"
+            except TaskStopped as exc:
+                return f"Task stopped: {exc}"

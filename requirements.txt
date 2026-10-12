@@ -1,1 +1,2 @@
-openai>=1.0.0
+# Tested direct dependency; exact transitive versions are in requirements.lock.
+openai==3.29.0

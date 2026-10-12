@@ -1,20 +1,21 @@
 import os
 from pathlib import Path
 from openai import OpenAI
+from agent_runtime.client import CancellableClient
+from agent_runtime.config import Settings
+from agent_runtime.execution import Task, TaskStopped, current_task, task_scope, completion, tool_results
+from agent_runtime.storage import SessionStore, repair_history, jsonable
 
 from tools import (
     ToolRegistry, TodoManager, setup_registry, SubAgent, SkillLoader,
     MessageBus, TeammateManager
 )
-from tools.colors import COLORS, colorize, tool_header, tool_output, round_header
+from tools.colors import round_header
 
 # Configuration
 OPENAI_URL = os.environ.get("OPENAI_URL", "https://api.openai.com/v1")
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-MODEL = os.environ.get("MODEL", "gpt-4o")
 TODO_REMINDER_THRESHOLD = 3
 SKILLS_DIR = os.environ.get("SKILLS_DIR", "skills")
-TEAM_DIR = Path(os.environ.get("TEAM_DIR", ".team"))
 
 
 def build_system_prompt(skill_loader: SkillLoader, bus: MessageBus, agent_name: str) -> str:
@@ -26,7 +27,10 @@ Use the todo tool to track progress on multi-step tasks.
 Use the skill tool to load specialized workflows when appropriate.
 Use spawn to create new teammates with specific roles.
 Use send to communicate with teammates.
-Use read_inbox to check for messages from teammates."""
+Use read_inbox to check for messages from teammates.
+Use team_status and team_wait to check progress and collect results before finalizing.
+Use team_cancel to stop work and team_resume to explicitly restore a saved teammate.
+Shell execution follows operator policy; do not try to bypass a disabled shell."""
 
     # Layer 1: Add skills summary to system prompt
     skills_summary = skill_loader.get_skills_summary()
@@ -43,7 +47,10 @@ class AgentLoop:
 
     def __init__(self, client: OpenAI, registry: ToolRegistry, todo_manager: TodoManager,
                  subagent: SubAgent, skill_loader: SkillLoader,
-                 bus: MessageBus, team_manager: TeammateManager, agent_name: str = "lead"):
+                 bus: MessageBus, team_manager: TeammateManager, agent_name: str = "lead", settings=None, store=None):
+        self.settings = settings or Settings.from_env()
+        self.MAX_ITERATIONS = self.settings.max_rounds
+        self.store = store
         self.client = client
         self.registry = registry
         self.todo_manager = todo_manager
@@ -57,146 +64,142 @@ class AgentLoop:
         self.messages = []
         self.system_prompt = build_system_prompt(skill_loader, bus, agent_name)
 
+    def checkpoint(self, status, task=None):
+        if self.store:
+            self.store.save(self.messages, self.todo_manager.items, status,
+                            task.task_id if task else None)
+
+    def restore(self):
+        if not self.store:
+            return "No session store configured"
+        data = self.store.load()
+        if not data:
+            return "No saved session"
+        self.messages = repair_history(data["messages"])
+        self.todo_manager.update(data.get("todo", []))
+        self.checkpoint("restored")
+        return "Session restored. Use /continue to resume without replaying completed tools."
+
+    def reset(self):
+        self.messages = []
+        self.todo_manager.items = []
+        self.checkpoint("reset")
+
     def run(self, query: str) -> str:
-        """Run the agent loop for a query."""
+        task = current_task.get() or Task(self.settings)
+        with task_scope(task):
+            try:
+                return self._run(query, task)
+            except TaskStopped as exc:
+                task.stop.set()
+                self.checkpoint("stopped", task)
+                return f"Task stopped: {exc}"
+            except BaseException:
+                task.stop.set()
+                self.checkpoint("interrupted", task)
+                raise
+
+    def _run(self, query, task):
         self.todo_skip_count = 0
         self.round_num = 0
         if not self.messages:
             self.messages.append({"role": "system", "content": self.system_prompt})
         messages = self.messages
         messages.append({"role": "user", "content": query})
-
-        for _ in range(self.MAX_ITERATIONS):
+        self.checkpoint("running", task)
+        for _ in range(min(self.MAX_ITERATIONS, self.settings.max_rounds)):
             self.round_num += 1
             print(round_header(self.round_num))
-
-            # Check inbox before each round
             inbox = self.bus.read_inbox(self.agent_name)
             if inbox != "[]":
-                messages.append({
-                    "role": "user",
-                    "content": f"<inbox>{inbox}</inbox>"
-                })
-
-            response = self.client.chat.completions.create(
-                model=MODEL,
-                messages=messages,
-                tools=self.registry.get_definitions(),
-                max_tokens=8000,
-            )
-
+                messages.append({"role": "user", "content": f"<inbox>{inbox}</inbox>"})
+            response = completion(self.client, self.settings.model, messages, self.registry, task)
             message = response.choices[0].message
-
-            # Print assistant content if present
-            if message.content:
-                content_preview = message.content[:200]
-                if len(message.content) > 200:
-                    content_preview += "..."
-                print(f"\n{COLORS['dim']}[thinking]{COLORS['reset']} {content_preview}")
-
-            messages.append({
-                "role": "assistant",
-                "content": message.content,
-                "tool_calls": message.tool_calls
-            })
-
+            messages.append(jsonable({"role": "assistant", "content": message.content,
+                                      "tool_calls": message.tool_calls}))
+            self.checkpoint("running", task)
             if not message.tool_calls:
-                return message.content
-
-            reminder = None
-            # Remind only after every tool call has a matching result.
+                if self.team_manager:
+                    if self.team_manager.has_pending():
+                        self.team_manager.wait_all(self.settings.team_wait_timeout)
+                    inbox = self.bus.read_inbox(self.agent_name)
+                    if inbox != "[]":
+                        messages.append({"role": "user", "content": f"<inbox>{inbox}</inbox>"})
+                        continue
+                    if self.team_manager.has_pending():
+                        self.checkpoint("waiting", task)
+                        return (message.content or "") + "\n[Teammates still pending; use team_status/team_wait or /continue.]"
+                self.checkpoint("completed", task)
+                return message.content or ""
             todo_called = any(tc.function.name == "todo" for tc in message.tool_calls)
-            if todo_called:
+            self.todo_skip_count = 0 if todo_called else self.todo_skip_count + 1
+            def save_result(result):
+                messages.append(result)
+                self.checkpoint("running", task)
+            tool_results(message, self.registry, task, save_result)
+            task.check()
+            if self.todo_skip_count >= TODO_REMINDER_THRESHOLD and self.todo_manager.items:
+                messages.append({"role": "user", "content": "[REMINDER] Update active todo tasks.\n" + self.todo_manager.render()})
                 self.todo_skip_count = 0
-            else:
-                self.todo_skip_count += 1
-                if self.todo_skip_count >= TODO_REMINDER_THRESHOLD and self.todo_manager.items:
-                    reminder = f"\n[REMINDER] You have active tasks but haven't updated todo for {self.todo_skip_count} rounds.\n{self.todo_manager.render()}\nConsider calling todo to track progress."
-                    self.todo_skip_count = 0
-
-            # Execute all tool calls
-            for tool_call in message.tool_calls:
-                tool_name = tool_call.function.name
-
-                # Print tool call with color
-                print(tool_header(tool_name))
-
-                # Execute and get output
-                output = self.registry.execute_json(tool_name, tool_call.function.arguments)[:50000]
-
-                # Print output preview
-                print(tool_output(output, max_lines=8))
-
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": output,
-                })
-            if reminder:
-                messages.append({"role": "user", "content": reminder})
-                print(colorize("[REMINDER: update active todo tasks]", "bright_yellow"))
-
+        task.stop.set()
+        self.checkpoint("limited", task)
         return "(agent reached iteration limit)"
 
 
 def main():
-    """Main entry point."""
-    client = OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_URL)
+    """Interactive entry point; credentials remain in the process environment."""
+    settings = Settings.from_env()
+    key = os.environ.get("OPENAI_API_KEY") or os.environ.get("EASYAGENTIC_API_KEY")
+    if not key:
+        raise SystemExit("Set OPENAI_API_KEY (or EASYAGENTIC_API_KEY) securely before starting.")
+    client = CancellableClient(api_key=key, base_url=OPENAI_URL, timeout=settings.api_timeout, max_retries=0)
     todo_manager = TodoManager()
-    subagent = SubAgent(client, MODEL)
+    subagent = SubAgent(client, settings.model, settings=settings)
     skill_loader = SkillLoader(SKILLS_DIR)
-
-    # Setup team
-    bus = MessageBus(TEAM_DIR)
-    team_manager = TeammateManager(TEAM_DIR, client, MODEL, bus)
-
-    # Print loaded skills
-    skills = skill_loader.get_skill_names()
-    if skills:
-        print(colorize(f"Loaded {len(skills)} skills: ", "cyan") + colorize(", ".join(skills), "dim"))
-
-    # Print team status
-    members = team_manager.list_members()
-    if members:
-        print(colorize(f"Team members: ", "green") + colorize(
-            ", ".join(f"{m['name']}({m['role']})" for m in members), "dim"))
-
-    # Parent registry includes all tools
-    registry = setup_registry(
-        todo_manager,
-        subagent_runner=subagent.run,
-        skill_loader=skill_loader,
-        team_manager=team_manager,
-        bus=bus,
-        agent_name="lead"
-    )
-
-    agent = AgentLoop(client, registry, todo_manager, subagent, skill_loader, bus, team_manager)
-
-    print(colorize("Simple Agent", "bright_cyan") + colorize(" - Type 'quit' to exit", "dim"))
-    print(colorize("-" * 40, "dim"))
-
-    while True:
-        try:
-            query = input(colorize("\nYou: ", "bright_green"))
-            if not query:
-                continue
-            if query.lower() in ["quit", "exit", "q"]:
-                print(colorize("Goodbye!", "bright_cyan"))
+    team_dir = Path(os.environ.get("TEAM_DIR", str(settings.state_path / "team")))
+    bus = MessageBus(team_dir)
+    team_manager = TeammateManager(team_dir, client, settings.model, bus, settings=settings)
+    registry = setup_registry(todo_manager, subagent_runner=subagent.run, skill_loader=skill_loader,
+                              team_manager=team_manager, bus=bus, agent_name="lead")
+    agent = AgentLoop(client, registry, todo_manager, subagent, skill_loader, bus, team_manager,
+                      settings=settings, store=SessionStore(settings.state_path / "session.json"))
+    print(f"Loaded {len(skill_loader.get_skill_names())} skills: " + ", ".join(skill_loader.get_skill_names()))
+    print("Simple Agent - quit to exit; /reset, /resume, /continue, /team-resume NAME")
+    try:
+        while True:
+            try:
+                query = input("\nYou: ").strip()
+                if not query:
+                    continue
+                if query.lower() in ("quit", "exit", "q"):
+                    print("Goodbye!")
+                    break
+                if query == "/reset":
+                    team_manager.shutdown_all()
+                    agent.bus.read_inbox("lead")
+                    agent.reset()
+                    print("Session reset")
+                    continue
+                if query == "/resume":
+                    print(agent.restore())
+                    continue
+                if query.startswith("/team-resume "):
+                    print(team_manager.resume(query.split(maxsplit=1)[1]))
+                    continue
+                if query == "/continue":
+                    query = "Continue the saved task; inspect existing results and do not repeat completed actions."
+                print("\nFinal Answer:\n" + agent.run(query))
+            except EOFError:
+                print("Goodbye!")
                 break
-
-            result = agent.run(query)
-            print(colorize("\nFinal Answer:", "bright_blue", styles=["bold"]))
-            if result:
-                print(result)
-        except (KeyboardInterrupt, EOFError):
-            print(colorize("\nGoodbye!", "bright_cyan"))
-            break
-        except Exception as e:
-            print(colorize(f"\nError: {e}", "bright_red"))
-
-    team_manager.shutdown_all()
-    client.close()
+            except KeyboardInterrupt:
+                print("Task interrupted; use /continue or /reset, or quit.")
+            except Exception as exc:
+                # Error bodies may contain request data; log only the class.
+                print(f"Request failed ({type(exc).__name__}); use /continue after resolving the cause.")
+    finally:
+        team_manager.shutdown_all()
+        client.close()
 
 
 if __name__ == "__main__":
