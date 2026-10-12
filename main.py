@@ -1,5 +1,4 @@
 import os
-import json
 from pathlib import Path
 from openai import OpenAI
 
@@ -7,7 +6,7 @@ from tools import (
     ToolRegistry, TodoManager, setup_registry, SubAgent, SkillLoader,
     MessageBus, TeammateManager
 )
-from tools.colors import COLORS, colorize, tool_header, tool_args, tool_output, round_header
+from tools.colors import COLORS, colorize, tool_header, tool_output, round_header
 
 # Configuration
 OPENAI_URL = os.environ.get("OPENAI_URL", "https://api.openai.com/v1")
@@ -40,6 +39,8 @@ Use read_inbox to check for messages from teammates."""
 class AgentLoop:
     """Agent loop with decoupled tool execution and subagent support."""
 
+    MAX_ITERATIONS = 50
+
     def __init__(self, client: OpenAI, registry: ToolRegistry, todo_manager: TodoManager,
                  subagent: SubAgent, skill_loader: SkillLoader,
                  bus: MessageBus, team_manager: TeammateManager, agent_name: str = "lead"):
@@ -53,18 +54,19 @@ class AgentLoop:
         self.agent_name = agent_name
         self.todo_skip_count = 0
         self.round_num = 0
+        self.messages = []
         self.system_prompt = build_system_prompt(skill_loader, bus, agent_name)
 
     def run(self, query: str) -> str:
         """Run the agent loop for a query."""
         self.todo_skip_count = 0
         self.round_num = 0
-        messages = [
-            {"role": "system", "content": self.system_prompt},
-            {"role": "user", "content": query}
-        ]
+        if not self.messages:
+            self.messages.append({"role": "system", "content": self.system_prompt})
+        messages = self.messages
+        messages.append({"role": "user", "content": query})
 
-        while True:
+        for _ in range(self.MAX_ITERATIONS):
             self.round_num += 1
             print(round_header(self.round_num))
 
@@ -101,7 +103,8 @@ class AgentLoop:
             if not message.tool_calls:
                 return message.content
 
-            # Todo reminder check
+            reminder = None
+            # Remind only after every tool call has a matching result.
             todo_called = any(tc.function.name == "todo" for tc in message.tool_calls)
             if todo_called:
                 self.todo_skip_count = 0
@@ -109,22 +112,17 @@ class AgentLoop:
                 self.todo_skip_count += 1
                 if self.todo_skip_count >= TODO_REMINDER_THRESHOLD and self.todo_manager.items:
                     reminder = f"\n[REMINDER] You have active tasks but haven't updated todo for {self.todo_skip_count} rounds.\n{self.todo_manager.render()}\nConsider calling todo to track progress."
-                    messages.append({"role": "user", "content": reminder})
-                    print(colorize(f"[REMINDER: {self.todo_skip_count} rounds without todo]", "bright_yellow"))
                     self.todo_skip_count = 0
-                    continue
 
             # Execute all tool calls
             for tool_call in message.tool_calls:
-                args = json.loads(tool_call.function.arguments)
                 tool_name = tool_call.function.name
 
                 # Print tool call with color
                 print(tool_header(tool_name))
-                print(tool_args(args))
 
                 # Execute and get output
-                output = self.registry.execute(tool_name, args)
+                output = self.registry.execute_json(tool_name, tool_call.function.arguments)[:50000]
 
                 # Print output preview
                 print(tool_output(output, max_lines=8))
@@ -134,6 +132,11 @@ class AgentLoop:
                     "tool_call_id": tool_call.id,
                     "content": output,
                 })
+            if reminder:
+                messages.append({"role": "user", "content": reminder})
+                print(colorize("[REMINDER: update active todo tasks]", "bright_yellow"))
+
+        return "(agent reached iteration limit)"
 
 
 def main():
@@ -186,11 +189,14 @@ def main():
             print(colorize("\nFinal Answer:", "bright_blue", styles=["bold"]))
             if result:
                 print(result)
-        except KeyboardInterrupt:
+        except (KeyboardInterrupt, EOFError):
             print(colorize("\nGoodbye!", "bright_cyan"))
             break
         except Exception as e:
             print(colorize(f"\nError: {e}", "bright_red"))
+
+    team_manager.shutdown_all()
+    client.close()
 
 
 if __name__ == "__main__":
