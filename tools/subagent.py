@@ -1,13 +1,12 @@
 """Subagent implementation."""
 
-import json
 from openai import OpenAI
 
 from .base import ToolRegistry
 from .bash import BASH_TOOL, handle_bash
 from .read_file import READ_FILE_TOOL, handle_read_file
 from .todo import TODO_TOOL, TodoManager, create_todo_handler
-from .colors import COLORS, colorize, tool_header, tool_args, tool_output, round_header
+from .colors import COLORS, colorize, tool_header, tool_output, round_header
 
 
 SUBAGENT_SYSTEM = """You are a specialized subagent tasked with completing a specific subtask.
@@ -42,6 +41,7 @@ class SubAgent:
 
     def run(self, prompt: str) -> str:
         """Run subagent loop and return final text result."""
+        self.todo_manager.items = []
         # Print subagent header
         print(colorize("\n┌─ SubAgent Started ─┐", "green", styles=["bold"]))
         prompt_preview = prompt[:100]
@@ -89,18 +89,14 @@ class SubAgent:
 
             # Execute all tool calls
             for tool_call in message.tool_calls:
-                args = json.loads(tool_call.function.arguments)
                 tool_name = tool_call.function.name
 
                 # Print tool call with color (indented for subagent)
                 print(f"{_subagent_prefix()}")
                 print(f"{_subagent_prefix()} {tool_header(tool_name).strip()}")
-                for line in tool_args(args).split("\n"):
-                    if line:
-                        print(f"{_subagent_prefix()}   {line}")
 
                 # Execute and get output
-                output = self.registry.execute(tool_name, args)
+                output = self.registry.execute_json(tool_name, tool_call.function.arguments)
                 output = output[:50000] if len(output) > 50000 else output
 
                 # Print output preview (indented)

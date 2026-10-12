@@ -1,5 +1,6 @@
 """Tool base classes and registry."""
 
+import json
 from typing import Callable, Dict, List
 from dataclasses import dataclass
 
@@ -30,7 +31,20 @@ class ToolRegistry:
         """Execute a tool by name with given arguments."""
         if name not in self._tools:
             return f"Error: Unknown tool '{name}'"
-        return self._tools[name].handler(args)
+        try:
+            if not isinstance(args, dict):
+                raise ValueError("Tool arguments must be a JSON object")
+            return self._tools[name].handler(args)
+        except Exception as exc:
+            return f"Error executing tool '{name}': {exc}"
+
+    def execute_json(self, name: str, arguments: str) -> str:
+        """Return a tool result even when model arguments are malformed."""
+        try:
+            args = json.loads(arguments)
+        except (ValueError, TypeError) as exc:
+            return f"Error: Invalid JSON arguments for '{name}': {exc}"
+        return self.execute(name, args)
 
     def has_tool(self, name: str) -> bool:
         """Check if a tool is registered."""
