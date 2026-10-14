@@ -5,7 +5,7 @@ import unittest
 from agent_runtime.client import CancellableClient
 from agent_runtime.config import Settings
 from agent_runtime.execution import Task, completion, task_scope
-from tools import ToolRegistry
+from tools.base import ToolRegistry
 
 
 @unittest.skipUnless(os.environ.get('EASYAGENTIC_RUN_LIVE') == '1', 'Live API test requires explicit opt-in')

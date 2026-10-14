@@ -13,8 +13,11 @@ import unittest
 from agent_runtime.client import CancellableClient
 from agent_runtime.config import Settings
 from agent_runtime.execution import Task, TaskStopped, completion, task_scope
-from main import AgentLoop
-from tools import MessageBus, SkillLoader, TodoManager, ToolRegistry
+from easyagentic.agents.lead import AgentLoop
+from agent_runtime.messages import MessageBus
+from tools.skills import SkillLoader
+from tools.todo import TodoManager
+from tools.base import ToolRegistry
 
 
 class HTTPTests(unittest.TestCase):

@@ -7,8 +7,12 @@ from agent_runtime.config import Settings
 from agent_runtime.execution import Task, task_scope
 from agent_runtime.review import ReviewQueue, ReviewRequired, review_queue
 from agent_runtime.storage import SessionStore
-from main import AgentLoop
-from tools import MessageBus, SkillLoader, SubAgent, TodoManager, setup_registry
+from easyagentic.agents.lead import AgentLoop
+from agent_runtime.messages import MessageBus
+from tools.skills import SkillLoader
+from easyagentic.agents.subagent import SubAgent
+from tools.todo import TodoManager
+from tools.registry import setup_registry
 from tools.write_file import handle_write_file
 from test_agents import Client, message
 from types import SimpleNamespace as NS
@@ -121,7 +125,7 @@ class ReviewTests(unittest.TestCase):
 
     def test_background_review_notifies_operator_and_resumes_after_decision(self):
         import time
-        from tools import TeammateManager
+        from easyagentic.agents.teammates import TeammateManager
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             settings = Settings(workdir=tmp,state_dir=str(root/'state'))

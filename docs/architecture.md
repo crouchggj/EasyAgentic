@@ -49,3 +49,15 @@ Keep future changes independently reviewable:
 Avoid combining these phases with storage migrations or changes to operator
 review policy. Each phase should preserve the CLI and import compatibility until
 an explicit deprecation is documented.
+
+## Learning-oriented cleanup
+
+The [learning guide](learning.md) introduces a standalone, read-only tool loop in
+`examples/basic_agent.py` before the full agent stack. It reuses the bounded file
+reader and exposes no write or shell tool. Application and example code are both
+included in overall coverage. Regression tests use canonical module imports;
+`tests/test_application.py` separately verifies legacy import compatibility.
+
+Unused terminal tool-formatting helpers and their compatibility exports were
+removed; remaining compatibility entry points are retained. Detailed operational
+instructions moved from README to [the application reference](operations.md).

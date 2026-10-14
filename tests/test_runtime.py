@@ -11,10 +11,16 @@ from unittest.mock import patch
 from agent_runtime.config import Settings
 from agent_runtime.execution import Budget, Task, TaskStopped, compact, completion, task_scope, token_bound
 from agent_runtime.storage import SessionStore
-from main import AgentLoop
+from easyagentic.agents.lead import AgentLoop
 from openai import APIConnectionError, APIStatusError
 import httpx2
-from tools import MessageBus, SkillLoader, SubAgent, TeammateManager, TodoManager, ToolRegistry, setup_registry
+from agent_runtime.messages import MessageBus
+from tools.skills import SkillLoader
+from easyagentic.agents.subagent import SubAgent
+from easyagentic.agents.teammates import TeammateManager
+from tools.todo import TodoManager
+from tools.base import ToolRegistry
+from tools.registry import setup_registry
 from tools.bash import handle_bash
 from support import cancel_when_ready, reviewed_shell
 from agent_runtime.review import review_queue

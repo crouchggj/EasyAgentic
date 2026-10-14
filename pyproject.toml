@@ -9,7 +9,7 @@ select = ["E9", "F"]
 [tool.coverage.run]
 branch = true
 patch = ["subprocess"]
-source = ["easyagentic", "agent_runtime", "tools", "main"]
+source = ["examples", "easyagentic", "agent_runtime", "tools", "main"]
 
 [tool.coverage.report]
 show_missing = true

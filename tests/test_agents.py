@@ -7,8 +7,14 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace as NS
 
-from main import AgentLoop
-from tools import MessageBus, SkillLoader, SubAgent, TeammateManager, TodoManager, ToolRegistry, setup_registry
+from easyagentic.agents.lead import AgentLoop
+from agent_runtime.messages import MessageBus
+from tools.skills import SkillLoader
+from easyagentic.agents.subagent import SubAgent
+from easyagentic.agents.teammates import TeammateManager
+from tools.todo import TodoManager
+from tools.base import ToolRegistry
+from tools.registry import setup_registry
 
 
 def message(content=None, calls=None):

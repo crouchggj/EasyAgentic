@@ -8,7 +8,9 @@ from agent_runtime.journal import TaskJournal
 from agent_runtime.config import Settings
 from agent_runtime.execution import Task, tool_results
 from agent_runtime.storage import SessionStore
-from tools import MessageBus, TodoManager, setup_registry
+from agent_runtime.messages import MessageBus
+from tools.todo import TodoManager
+from tools.registry import setup_registry
 from test_agents import message
 from types import SimpleNamespace as NS
 
@@ -111,7 +113,7 @@ class MessageTests(unittest.TestCase):
 
     def test_completed_outbox_recovery_does_not_rerun_model_or_duplicate_result(self):
         import time
-        from tools import TeammateManager
+        from easyagentic.agents.teammates import TeammateManager
         from test_agents import Client, message
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp)
@@ -142,7 +144,7 @@ class MessageTests(unittest.TestCase):
                 manager.shutdown_all()
 
     def test_checkpoint_initialization_failure_is_visible_to_lead(self):
-        from tools import TeammateManager
+        from easyagentic.agents.teammates import TeammateManager
         from test_agents import Client
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp)
