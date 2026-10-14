@@ -65,10 +65,10 @@ class SessionStore:
     def __init__(self, path):
         self.path = Path(path)
 
-    def save(self, messages, todo, status, task_id=None):
+    def save(self, messages, todo, status, task_id=None, received_ids=None, outbox=None):
         with file_lock(self.path.with_suffix('.lock')):
             atomic_json(self.path, {'version': 1, 'messages': messages, 'todo': todo,
-                                    'status': status, 'task_id': task_id})
+                                    'status': status, 'task_id': task_id, 'received_ids': sorted(received_ids or []), 'outbox': outbox or []})
 
     def load(self):
         if not self.path.exists():

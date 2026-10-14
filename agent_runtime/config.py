@@ -27,15 +27,19 @@ class Settings:
     max_teammates: int = 8
     workdir: str = '.'
     state_dir: str = '.easyagentic'
+    message_lease: float = 30.0
+    message_attempts: int = 5
+    review_timeout: float = 900.0
+    write_limit_bytes: int = 1048576
 
     def __post_init__(self):
         if not self.model.strip():
             raise ValueError("model must be nonempty")
         for name in ('max_rounds', 'subagent_rounds', 'max_tokens', 'output_tokens',
-                     'context_tokens', 'shell_output_bytes', 'max_teammates'):
+                     'context_tokens', 'shell_output_bytes', 'max_teammates', 'write_limit_bytes', 'message_attempts'):
             if getattr(self, name) <= 0:
                 raise ValueError(f'{name} must be positive')
-        for name in ('task_timeout', 'api_timeout', 'shell_timeout', 'team_wait_timeout'):
+        for name in ('task_timeout', 'api_timeout', 'shell_timeout', 'team_wait_timeout', 'review_timeout', 'message_lease'):
             if not math.isfinite(getattr(self, name)) or getattr(self, name) <= 0:
                 raise ValueError(f'{name} must be finite and positive')
         for name in ('max_cost_usd', 'input_usd_per_million', 'output_usd_per_million'):

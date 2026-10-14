@@ -7,6 +7,7 @@ from agent_runtime.storage import jsonable
 
 from .base import ToolRegistry
 from .bash import BASH_TOOL, handle_bash
+from .write_file import WRITE_FILE_TOOL, handle_write_file
 from .read_file import READ_FILE_TOOL, handle_read_file
 from .todo import TODO_TOOL, TodoManager, create_todo_handler
 
@@ -35,6 +36,7 @@ class SubAgent:
         registry = ToolRegistry()
         registry.register("bash", BASH_TOOL, handle_bash)
         registry.register("read_file", READ_FILE_TOOL, handle_read_file)
+        registry.register("write_file", WRITE_FILE_TOOL, handle_write_file)
         registry.register("todo", TODO_TOOL, create_todo_handler(self.todo_manager))
         return registry
 
@@ -55,6 +57,8 @@ class SubAgent:
                     if not message.tool_calls:
                         return message.content or "(no summary)"
                     messages.extend(tool_results(message, self.registry, task))
+                    if task.pending_reviews:
+                        return "Awaiting operator review: " + ", ".join(task.pending_reviews)
                     task.check()
                 return "(subagent reached iteration limit)"
             except TaskStopped as exc:

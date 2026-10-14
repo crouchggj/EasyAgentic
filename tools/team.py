@@ -1,8 +1,6 @@
 """Agent Teams - Persistent multi-agent collaboration with message bus."""
 
 import math
-import re
-from contextlib import contextmanager
 import json
 import time
 import threading
@@ -11,12 +9,14 @@ from typing import Dict, List, Callable
 from dataclasses import dataclass
 from openai import OpenAI
 
+from agent_runtime.journal import TaskJournal
 from agent_runtime.config import Settings
 from agent_runtime.execution import Task, TaskStopped, current_task, task_scope, completion, tool_results
 from agent_runtime.storage import file_lock, atomic_json, SessionStore, repair_history, jsonable
 
 from .base import ToolRegistry
 from .bash import BASH_TOOL, handle_bash
+from .write_file import WRITE_FILE_TOOL, handle_write_file
 from .read_file import READ_FILE_TOOL, handle_read_file
 from .todo import TODO_TOOL, TodoManager, create_todo_handler
 from .colors import colorize
@@ -26,78 +26,7 @@ from .colors import colorize
 # MessageBus - Append-only JSONL inbox for inter-agent communication
 # ============================================================================
 
-class MessageBus:
-    """Message bus for inter-agent communication via JSONL files.
-
-    - send(): append message to recipient's inbox
-    - read_inbox(): read and drain inbox (consume-on-read)
-    """
-
-    def __init__(self, team_dir: Path):
-        self.dir = team_dir / "inbox"
-        self.dir.mkdir(parents=True, exist_ok=True)
-        self._contexts = {}
-        self._context_lock = threading.Lock()
-
-    @staticmethod
-    def validate_name(name: str):
-        if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", name):
-            raise ValueError("Agent name must contain 1-64 letters, digits, underscores or hyphens")
-
-    @contextmanager
-    def _inbox_lock(self, name: str):
-        self.validate_name(name)
-        # File locks also protect separate MessageBus instances/processes.
-        with file_lock(self.dir / f"{name}.lock"):
-            path = self.dir / f"{name}.jsonl"
-            if path.is_symlink():
-                raise ValueError("Inbox path may not be a symlink")
-            yield path
-
-    def send(self, sender: str, to: str, content: str,
-             msg_type: str = "message", extra: dict = None) -> str:
-        """Send a message to a teammate's inbox."""
-        msg = {
-            "type": msg_type,
-            "from": sender,
-            "content": content,
-            "timestamp": time.time()
-        }
-        if extra:
-            msg.update(extra)
-
-        self.validate_name(sender)
-        with self._inbox_lock(to) as inbox_path:
-            if msg_type == "message":
-                with self._context_lock:
-                    self._contexts[to] = current_task.get()
-            with inbox_path.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(msg, ensure_ascii=False) + "\n")
-
-        return f"Message sent to {to}"
-
-    def read_inbox(self, name: str) -> str:
-        """Read and drain inbox for a teammate."""
-        with self._inbox_lock(name) as inbox_path:
-            if not inbox_path.exists():
-                return "[]"
-            lines = inbox_path.read_text(encoding="utf-8").splitlines()
-            msgs = [json.loads(line) for line in lines if line.strip()]
-            inbox_path.write_text("", encoding="utf-8")
-        return json.dumps(msgs, indent=2, ensure_ascii=False)
-
-    def take_context(self, name):
-        with self._context_lock:
-            return self._contexts.pop(name, None)
-
-    def broadcast(self, sender: str, content: str,
-                  msg_type: str = "broadcast", members: List[str] = None) -> str:
-        """Broadcast a message to all team members."""
-        recipients = members or []
-        for name in recipients:
-            if name != sender:  # Don't send to self
-                self.send(sender, name, content, msg_type)
-        return f"Broadcast sent to {len(recipients)} members"
+from agent_runtime.messages import MessageBus
 
 
 # ============================================================================
@@ -168,13 +97,28 @@ class TeammateManager:
         registry = ToolRegistry()
         registry.register("bash", BASH_TOOL, handle_bash)
         registry.register("read_file", READ_FILE_TOOL, handle_read_file)
+        registry.register("write_file", WRITE_FILE_TOOL, handle_write_file)
         # Each teammate has its own todo manager
         todo_manager = TodoManager()
         registry.register("todo", TODO_TOOL, create_todo_handler(todo_manager))
         registry.todo_manager = todo_manager
         registry.register("send", SEND_TOOL, create_send_handler(self.bus, name))
-        registry.register("read_inbox", READ_INBOX_TOOL, create_read_inbox_handler(self.bus, name))
+        registry.register("read_inbox", READ_INBOX_TOOL, create_read_inbox_handler(self.bus, name, registry))
         return registry
+
+    def _run_teammate_thread(self, name, role, prompt, stop_event):
+        try:
+            self._teammate_loop(name, role, prompt, stop_event)
+        except Exception as exc:
+            task = self._contexts[name][0]
+            error = f"Teammate infrastructure failed ({type(exc).__name__}); inspect checkpoint and delivery state before resuming."
+            self._update_status(name, "shutdown", outcome="error", result=error)
+            TaskJournal(self.settings.state_path).record(task, "error", actor=name)
+            try:
+                self.bus.send(name, "lead", error, "error", {"task_id": task.task_id}, message_id="failure:" + task.task_id)
+            except Exception:
+                # The retained member outcome still exposes failures while the queue is unavailable.
+                pass
 
     def _teammate_loop(self, name: str, role: str, prompt: str, stop_event: threading.Event):
         """Main loop for a teammate agent."""
@@ -182,7 +126,8 @@ class TeammateManager:
 
         registry = self._setup_teammate_registry(name)
         store = self._store(name)
-        snapshot = store.load() if self._contexts[name][1] else None
+        prior = store.load()
+        snapshot = prior if self._contexts[name][1] else None
         messages = repair_history(snapshot["messages"]) if snapshot else []
         if snapshot:
             messages.append({"role": "user", "content": "Resume from the checkpoint. Do not replay completed tools; inspect interrupted actions first."})
@@ -193,25 +138,53 @@ class TeammateManager:
         todo = registry.todo_manager
         if snapshot:
             todo.update(snapshot.get("todo", []))
+        seen = set(prior.get("received_ids", [])) if prior else set()
+        registry.seen_messages = seen
         idle = False
         iterations = 0
         task = self._contexts[name][0]
-        def save(status):
-            store.save(messages, todo.items, status, task.task_id)
-        save("running")
+        outbox = list(snapshot.get("outbox", [])) if snapshot else []
+        saved_status = None
+        def save(status, received=None):
+            nonlocal saved_status
+            store.save(messages, todo.items, status, task.task_id,
+                       registry.received_ids() if received is None else received, outbox=outbox)
+            TaskJournal(self.settings.state_path).record(task, status, actor=name)
+            saved_status = status
+        if not (snapshot and snapshot["status"] == "completed"):
+            save("running")
+        if snapshot and snapshot["status"] == "completed":
+            result = next((m.get("content") for m in reversed(messages) if m["role"] == "assistant" and not m.get("tool_calls")), "(no summary)")
+            if not outbox:
+                outbox = [{"id": "result:" + snapshot["task_id"], "content": result, "task_id": snapshot["task_id"]}]
+            save("completed")
+            try:
+                self._publish_outbox(name, outbox)
+                self._update_status(name, "shutdown", outcome="completed", result=result)
+            except Exception:
+                self._update_status(name, "shutdown", outcome="delivery_pending", result=result)
+                TaskJournal(self.settings.state_path).record(task, "delivery_pending", actor=name)
+            return
         try:
             while not stop_event.is_set():
-                inbox = self.bus.read_inbox(name)
-                if inbox != "[]":
-                    parent = self.bus.take_context(name)
-                    messages = repair_history(jsonable(messages))
-                    messages.append({"role": "user", "content": f"<inbox>{inbox}</inbox>"})
+                def accept_inbox(inbox, received):
+                    nonlocal messages, task, idle, iterations, outbox
+                    previous = (messages, task, idle, iterations, outbox)
+                    messages = repair_history(jsonable(messages)) + [{"role": "user", "content": f"<inbox>{inbox}</inbox>"}]
                     if idle:
-                        iterations = 0
+                        parent = self.bus.take_context(name)
                         task = parent.child(stop_event) if parent else Task(self.settings, stop=stop_event)
-                        self._update_status(name, "working", task_id=task.task_id, result=None, outcome=None)
+                        iterations = 0
+                        outbox = []
                     idle = False
-                    save("running")
+                    try:
+                        save("running", received)
+                        self._contexts[name] = (task, False)
+                        self._update_status(name, "working", task_id=task.task_id, result=None, outcome=None, pending_reviews=[])
+                    except BaseException:
+                        messages, task, idle, iterations, outbox = previous
+                        raise
+                self.bus.receive(name, seen, accept_inbox)
                 if idle:
                     stop_event.wait(0.1)
                     continue
@@ -231,15 +204,26 @@ class TeammateManager:
                         save("running")
                         if not message.tool_calls:
                             result = message.content or "(no summary)"
+                            outbox = [{"id": "result:" + task.task_id, "content": result, "task_id": task.task_id}]
                             save("completed")
-                            self.bus.send(name, "lead", result, "result", {"task_id": task.task_id})
-                            self._update_status(name, "idle", result=result, outcome="completed")
                             idle = True
+                            try:
+                                self._publish_outbox(name, outbox)
+                            except Exception:
+                                self._update_status(name, "shutdown", outcome="delivery_pending", result=result)
+                                TaskJournal(self.settings.state_path).record(task, "delivery_pending", actor=name)
+                                break
+                            self._update_status(name, "idle", result=result, outcome="completed")
                             continue
                         def save_result(result):
                             messages.append(result)
                             save("running")
                         tool_results(message, registry, task, save_result)
+                        if task.pending_reviews:
+                            self._update_status(name, "awaiting_review", outcome="awaiting_review", result=", ".join(task.pending_reviews), pending_reviews=list(task.pending_reviews))
+                            save("awaiting_review")
+                            idle = True
+                            continue
                         task.check()
                 except TaskStopped as exc:
                     self._update_status(name, "shutdown", outcome="stopped", result=str(exc))
@@ -260,9 +244,13 @@ class TeammateManager:
                 save("limited")
         finally:
             self._update_status(name, "shutdown")
-            if stop_event.is_set():
+            if stop_event.is_set() and saved_status not in ("completed", "awaiting_review"):
                 save("cancelled")
             print(colorize(f"\n[Team] {name} shutdown", "yellow"))
+
+    def _publish_outbox(self, name, outbox):
+        for entry in outbox:
+            self.bus.send(name, "lead", entry["content"], "result", {"task_id": entry["task_id"]}, message_id=entry["id"])
 
     def _update_status(self, name: str, status: str, **updates):
         with self._lock:
@@ -294,7 +282,7 @@ class TeammateManager:
                                             "status": "working", "task_id": task.task_id,
                                             "result": None, "outcome": None})
             self._save_config()
-            thread = threading.Thread(target=self._teammate_loop,
+            thread = threading.Thread(target=self._run_teammate_thread,
                                       args=(name, role, prompt, stop_event), daemon=True)
             self.teammates[name] = Teammate(name, role, "working", thread, stop_event)
             thread.start()
@@ -319,6 +307,11 @@ class TeammateManager:
                 teammate.stop_event.set()
         for name in names:
             self.shutdown(name)
+
+    def notify_review(self, request):
+        for member in self.list_members():
+            if member["status"] == "awaiting_review" and (member.get("task_id") == request.get("task_id") or request["id"] in member.get("pending_reviews", [])):
+                self.bus.send("lead", member["name"], f"Operator {request['status']} review {request['id']}. Resubmit only the exact approved operation; never retry a rejected operation.")
 
     def resume(self, name):
         self.bus.validate_name(name)
@@ -394,7 +387,8 @@ SEND_TOOL = {
             "type": "object",
             "properties": {
                 "to": {"type": "string", "description": "Name of the recipient teammate"},
-                "content": {"type": "string", "description": "Message content"}
+                "content": {"type": "string", "description": "Message content"},
+                "message_id": {"type": "string", "description": "Optional stable ID for idempotent retries"}
             },
             "required": ["to", "content"]
         }
@@ -425,12 +419,16 @@ def create_spawn_handler(manager: TeammateManager) -> Callable:
 def create_send_handler(bus: MessageBus, sender: str) -> Callable:
     """Create send tool handler."""
     def handle_send(args: dict) -> str:
-        return bus.send(sender, args["to"], args["content"])
+        return bus.send(sender, args["to"], args["content"], message_id=args.get("message_id"))
     return handle_send
 
 
-def create_read_inbox_handler(bus: MessageBus, name: str) -> Callable:
+def create_read_inbox_handler(bus: MessageBus, name: str, registry=None) -> Callable:
     """Create read_inbox tool handler."""
     def handle_read_inbox(args: dict) -> str:
-        return bus.read_inbox(name)
+        if registry is None:
+            return bus.read_inbox(name)
+        deliveries = bus.claim(name)
+        registry.pending_messages.append((bus, deliveries))
+        return json.dumps([d["payload"] for d in deliveries if d["id"] not in registry.seen_messages])
     return handle_read_inbox

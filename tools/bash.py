@@ -9,6 +9,7 @@ import time
 import uuid
 
 from agent_runtime.config import Settings
+from agent_runtime.review import review_queue
 from agent_runtime.execution import current_task, TaskStopped
 
 BASH_TOOL = {
@@ -72,6 +73,9 @@ def handle_bash(args):
         argv = ['cmd.exe', '/d', '/s', '/c', command] if os.name == 'nt' else ['/bin/sh', '-c', command]
         # Local mode is explicitly unsafe; cwd and clean env are not a sandbox.
         env = {k: v for k, v in os.environ.items() if k in ('PATH', 'SYSTEMROOT', 'WINDIR')}
+    review_queue(settings).require({'tool': 'bash', 'command': command, 'workdir': str(root),
+                                    'mode': settings.shell_mode, 'image': settings.docker_image},
+                                   task.task_id if task else None)
     deadline = time.monotonic() + settings.shell_timeout
     if task:
         deadline = min(deadline, task.deadline)

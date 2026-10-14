@@ -8,7 +8,8 @@ import time
 import unittest
 from agent_runtime.config import Settings
 from agent_runtime.execution import Task, task_scope
-from tools.bash import docker_command, handle_bash
+from tools.bash import docker_command
+from support import reviewed_shell as handle_bash
 
 
 @unittest.skipUnless(os.environ.get('EASYAGENTIC_TEST_DOCKER_IMAGE'), 'Docker integration requires an explicit pre-pulled digest')

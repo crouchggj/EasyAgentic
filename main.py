@@ -1,6 +1,8 @@
 import os
 from pathlib import Path
 from openai import OpenAI
+from agent_runtime.journal import TaskJournal
+from agent_runtime.review import review_queue
 from agent_runtime.client import CancellableClient
 from agent_runtime.config import Settings
 from agent_runtime.execution import Task, TaskStopped, current_task, task_scope, completion, tool_results
@@ -30,7 +32,9 @@ Use send to communicate with teammates.
 Use read_inbox to check for messages from teammates.
 Use team_status and team_wait to check progress and collect results before finalizing.
 Use team_cancel to stop work and team_resume to explicitly restore a saved teammate.
-Shell execution follows operator policy; do not try to bypass a disabled shell."""
+Use write_file for file edits; execution requires operator review of the exact diff.
+Shell execution follows operator policy and operator review; do not bypass either.
+If a review is pending, stop work and wait for the operator; never approve your own actions."""
 
     # Layer 1: Add skills summary to system prompt
     skills_summary = skill_loader.get_skills_summary()
@@ -62,12 +66,18 @@ class AgentLoop:
         self.todo_skip_count = 0
         self.round_num = 0
         self.messages = []
+        saved = self.store.load() if self.store else None
+        self.received_ids = set(saved.get("received_ids", [])) if saved else set()
+        self.registry.seen_messages = self.received_ids
         self.system_prompt = build_system_prompt(skill_loader, bus, agent_name)
 
-    def checkpoint(self, status, task=None):
+    def checkpoint(self, status, task=None, received=None):
         if self.store:
             self.store.save(self.messages, self.todo_manager.items, status,
-                            task.task_id if task else None)
+                            task.task_id if task else None,
+                            self.registry.received_ids() if received is None else received)
+        if task:
+            TaskJournal(self.settings.state_path).record(task, status)
 
     def restore(self):
         if not self.store:
@@ -76,14 +86,28 @@ class AgentLoop:
         if not data:
             return "No saved session"
         self.messages = repair_history(data["messages"])
+        self.received_ids = set(data.get("received_ids", []))
+        self.registry.seen_messages = self.received_ids
         self.todo_manager.update(data.get("todo", []))
         self.checkpoint("restored")
         return "Session restored. Use /continue to resume without replaying completed tools."
 
     def reset(self):
         self.messages = []
+        self.received_ids = set()
+        self.registry.seen_messages = self.received_ids
         self.todo_manager.items = []
         self.checkpoint("reset")
+
+    def receive_inbox(self, task):
+        def accept(inbox, received):
+            self.messages.append({"role": "user", "content": f"<inbox>{inbox}</inbox>"})
+            try:
+                self.checkpoint("running", task, received)
+            except BaseException:
+                self.messages.pop()
+                raise
+        return self.bus.receive(self.agent_name, self.received_ids, accept)
 
     def run(self, query: str) -> str:
         task = current_task.get() or Task(self.settings)
@@ -102,29 +126,32 @@ class AgentLoop:
     def _run(self, query, task):
         self.todo_skip_count = 0
         self.round_num = 0
-        if not self.messages:
-            self.messages.append({"role": "system", "content": self.system_prompt})
+        self.registry.seen_messages = self.received_ids
+        if not self.messages or self.messages[0]["role"] != "system":
+            self.messages.insert(0, {"role": "system", "content": self.system_prompt})
         messages = self.messages
         messages.append({"role": "user", "content": query})
         self.checkpoint("running", task)
         for _ in range(min(self.MAX_ITERATIONS, self.settings.max_rounds)):
             self.round_num += 1
             print(round_header(self.round_num))
-            inbox = self.bus.read_inbox(self.agent_name)
-            if inbox != "[]":
-                messages.append({"role": "user", "content": f"<inbox>{inbox}</inbox>"})
+            self.receive_inbox(task)
             response = completion(self.client, self.settings.model, messages, self.registry, task)
             message = response.choices[0].message
             messages.append(jsonable({"role": "assistant", "content": message.content,
                                       "tool_calls": message.tool_calls}))
             self.checkpoint("running", task)
+            if task.pending_reviews and not message.tool_calls:
+                self.checkpoint("awaiting_review", task)
+                return "Awaiting operator review: " + ", ".join(task.pending_reviews)
             if not message.tool_calls:
                 if self.team_manager:
                     if self.team_manager.has_pending():
                         self.team_manager.wait_all(self.settings.team_wait_timeout)
-                    inbox = self.bus.read_inbox(self.agent_name)
-                    if inbox != "[]":
-                        messages.append({"role": "user", "content": f"<inbox>{inbox}</inbox>"})
+                    if task.pending_reviews:
+                        self.checkpoint("awaiting_review", task)
+                        return "Awaiting operator review: " + ", ".join(task.pending_reviews)
+                    if self.receive_inbox(task):
                         continue
                     if self.team_manager.has_pending():
                         self.checkpoint("waiting", task)
@@ -137,6 +164,9 @@ class AgentLoop:
                 messages.append(result)
                 self.checkpoint("running", task)
             tool_results(message, self.registry, task, save_result)
+            if task.pending_reviews:
+                self.checkpoint("awaiting_review", task)
+                return "Awaiting operator review: " + ", ".join(task.pending_reviews)
             task.check()
             if self.todo_skip_count >= TODO_REMINDER_THRESHOLD and self.todo_manager.items:
                 messages.append({"role": "user", "content": "[REMINDER] Update active todo tasks.\n" + self.todo_manager.render()})
@@ -157,14 +187,17 @@ def main():
     subagent = SubAgent(client, settings.model, settings=settings)
     skill_loader = SkillLoader(SKILLS_DIR)
     team_dir = Path(os.environ.get("TEAM_DIR", str(settings.state_path / "team")))
-    bus = MessageBus(team_dir)
+    bus = MessageBus(team_dir, settings.message_lease, settings.message_attempts)
     team_manager = TeammateManager(team_dir, client, settings.model, bus, settings=settings)
     registry = setup_registry(todo_manager, subagent_runner=subagent.run, skill_loader=skill_loader,
                               team_manager=team_manager, bus=bus, agent_name="lead")
     agent = AgentLoop(client, registry, todo_manager, subagent, skill_loader, bus, team_manager,
                       settings=settings, store=SessionStore(settings.state_path / "session.json"))
     print(f"Loaded {len(skill_loader.get_skill_names())} skills: " + ", ".join(skill_loader.get_skill_names()))
-    print("Simple Agent - quit to exit; /reset, /resume, /continue, /team-resume NAME")
+    journal = TaskJournal(settings.state_path)
+    journal.recover()
+    reviews = review_queue(settings)
+    print("Simple Agent - /reviews, /review ID, /approve ID, /reject ID; /resume, /continue, /reset, quit")
     try:
         while True:
             try:
@@ -174,9 +207,33 @@ def main():
                 if query.lower() in ("quit", "exit", "q"):
                     print("Goodbye!")
                     break
+                if query == "/tasks":
+                    import json
+                    print(json.dumps(journal.list(), indent=2))
+                    continue
+                if query == "/reviews":
+                    print("\n".join(f"{r['id']} {r['status']} {r['operation']['tool']}" for r in reviews.requests()) or "No review requests")
+                    continue
+                if query.startswith("/review "):
+                    print(reviews.preview(query.split(maxsplit=1)[1]))
+                    continue
+                if query.startswith(("/approve ", "/reject ")):
+                    request = reviews.decide(query.split(maxsplit=1)[1], query.startswith("/approve "))
+                    agent.messages.append({"role": "user", "content": f"Operator {request['status']} review {request['id']}. Resubmit only the exact approved operation."})
+                    agent.checkpoint("review_decided")
+                    team_manager.notify_review(request)
+                    print(request['status'] + "; use /continue for lead work")
+                    continue
+                if query == "/messages":
+                    import json
+                    print(json.dumps(bus.status(), indent=2))
+                    continue
+                if query.startswith("/message-retry "):
+                    print(bus.retry(query.split(maxsplit=1)[1]))
+                    continue
                 if query == "/reset":
                     team_manager.shutdown_all()
-                    agent.bus.read_inbox("lead")
+                    agent.bus.discard("lead")
                     agent.reset()
                     print("Session reset")
                     continue
@@ -194,6 +251,11 @@ def main():
                 break
             except KeyboardInterrupt:
                 print("Task interrupted; use /continue or /reset, or quit.")
+            except (ValueError, FileNotFoundError) as exc:
+                if query.startswith(("/review", "/approve", "/reject", "/message-retry", "/team-resume")):
+                    print(f"Command refused: {exc}")
+                else:
+                    print(f"Request failed ({type(exc).__name__}); use /continue after resolving the cause.")
             except Exception as exc:
                 # Error bodies may contain request data; log only the class.
                 print(f"Request failed ({type(exc).__name__}); use /continue after resolving the cause.")

@@ -4,6 +4,7 @@ import json
 from typing import Callable, Dict, List
 from dataclasses import dataclass
 from agent_runtime.execution import TaskStopped
+from agent_runtime.review import ReviewRequired
 
 
 @dataclass
@@ -19,6 +20,8 @@ class ToolRegistry:
 
     def __init__(self):
         self._tools: Dict[str, Tool] = {}
+        self.seen_messages = set()
+        self.pending_messages = []
 
     def register(self, name: str, definition: dict, handler: Callable[[dict], str]):
         """Register a tool with its definition and handler."""
@@ -39,7 +42,7 @@ class ToolRegistry:
             if not isinstance(result, str):
                 raise TypeError("Tool handlers must return strings")
             return result
-        except TaskStopped:
+        except (TaskStopped, ReviewRequired):
             raise
         except Exception as exc:
             return f"Error executing tool '{name}': {exc}"
@@ -51,6 +54,16 @@ class ToolRegistry:
         except (ValueError, TypeError) as exc:
             return f"Error: Invalid JSON arguments for '{name}': {exc}"
         return self.execute(name, args)
+
+    def received_ids(self):
+        return self.seen_messages | {d['id'] for _, deliveries in self.pending_messages for d in deliveries}
+
+    def after_result(self):
+        # The caller has durably saved this tool result and the corresponding IDs.
+        pending, self.pending_messages = self.pending_messages, []
+        for bus, deliveries in pending:
+            self.seen_messages.update(d['id'] for d in deliveries)
+            bus.acknowledge(deliveries)
 
     def has_tool(self, name: str) -> bool:
         """Check if a tool is registered."""

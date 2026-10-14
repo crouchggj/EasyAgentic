@@ -11,7 +11,8 @@ It is an experimental project inspired by
 
 ## What you can do
 
-- **Use tools:** read workspace files, manage Todos, and load Markdown skills on demand.
+- **Use tools:** read workspace files, propose reviewed file edits, manage Todos, and load Markdown skills on demand.
+- **Review changes first:** inspect file diffs and shell commands, then approve or reject exact operations.
 - **Delegate work:** run synchronous subagents or background teammates that exchange messages.
 - **Control execution:** limit rounds, tokens, estimated cost, elapsed time, and teammate count.
 - **Resume tasks:** restore conversation and Todo checkpoints without automatically replaying tools.
@@ -85,6 +86,7 @@ flowchart LR
 | Tool | Purpose |
 | --- | --- |
 | `read_file`, `todo`, `skill` | Read workspace files, track tasks, and load skill instructions |
+| `write_file` | Propose a bounded UTF-8 file edit for operator diff review |
 | `bash` | Execute a command under the operator's shell policy |
 | `task` | Delegate a synchronous subtask; subagents cannot recursively delegate |
 | `spawn`, `send`, `read_inbox` | Start teammates and exchange messages |
@@ -105,10 +107,41 @@ inboxes, and `team_status` includes task IDs, outcomes, and results.
 | `/reset` | Stop teammates, drain the lead inbox, and clear lead conversation and Todo state |
 | `/resume` | Restore the saved lead conversation and Todos |
 | `/continue` | Continue the current in-memory conversation with a new task budget |
-| `/team-resume NAME` | Restore a stopped teammate with a new task budget |
+| `/team-resume NAME` | Restore a stopped teammate; completed checkpoints republish retained results without rerunning the model |
+| `/reviews`, `/review ID` | List requests and inspect the exact diff or shell command |
+| `/approve ID`, `/reject ID` | Decide a previewed request; only the operator can issue these commands |
+| `/tasks` | Inspect durable task outcomes, including interrupted work |
+| `/messages`, `/message-retry ID` | Inspect delivery state and explicitly requeue a dead-letter message |
 
 After restarting the application, use `/resume` followed by `/continue` to continue a
 saved lead task. Teammate threads do not restart automatically.
+
+## Execution review
+
+Every `write_file` edit and enabled `bash` command requires a separate operator decision.
+The agent pauses without executing the operation or later calls in that tool batch:
+
+```text
+/reviews
+/review REQUEST_ID
+/approve REQUEST_ID
+/continue
+```
+
+Use `/reject REQUEST_ID` to decline. Approval alone does not execute lead work; the
+agent must resubmit the identical operation after `/continue`. Awaiting teammates
+receive the decision and resume their workflow. Editing the proposal, changing the
+file's reviewed base, or changing shell mode/image requires a fresh review. Grants
+are one-use, expire after `REVIEW_TIMEOUT`, and do not survive process restarts;
+persisted request files are never treated as authorization. Preview again before
+reapproving a request after restart. No approval tool is exposed to the model.
+
+File previews show unified diffs. The file tool cannot edit outside the workspace,
+Git metadata, or runtime state. Shell previews show the full command, workdir and
+mode; arbitrary shell effects cannot be predicted as a file diff. An approved shell
+command still has the permissions of the configured executor. Review complements
+Docker isolation, rather than replacing it. Requests contain command text and file
+contents: protect their state directory along with checkpoints.
 
 ## Configuration
 
@@ -130,6 +163,8 @@ The settings in this table use the **`EASYAGENTIC_` prefix**. For example,
 | `SHELL_MODE` | `disabled` | `disabled`, `docker`, or Unix-only `local` |
 | `SHELL_TIMEOUT` / `SHELL_OUTPUT_BYTES` | `30` seconds / `64000` bytes | Shell timeout and bounded output; byte limit also bounds file reads |
 | `DOCKER_IMAGE` | Empty | Pre-pulled shell image pinned by repository digest |
+| `REVIEW_TIMEOUT` / `WRITE_LIMIT_BYTES` | `900` seconds / `1048576` bytes | Review expiry and maximum editable text file size |
+| `MESSAGE_LEASE` / `MESSAGE_ATTEMPTS` | `30` seconds / `5` | Unacknowledged delivery lease and retry limit |
 
 Additional variables have **no prefix**: `OPENAI_URL` selects the API base URL,
 `SKILLS_DIR` selects skills, and `TEAM_DIR` overrides the team state path.
@@ -202,17 +237,34 @@ Default runtime files live under `.easyagentic/` and are ignored by Git:
 | `session.json` | Lead conversation, Todos, and checkpoint status |
 | `team/config.json` | Member roles, prompts, task IDs, outcomes, and retained results |
 | `team/tasks/` | Teammate conversation and Todo checkpoints |
-| `team/inbox/` | File-based message inboxes |
+| `team/inbox/messages.sqlite3` | Durable message queue, leases, acknowledgements and dead letters |
+| `tasks.sqlite3` | Task/parent IDs, outcomes and interruption records |
+| `reviews/` | Proposed operations and operator decisions |
 | `events.jsonl` | Task/parent IDs, latency, retry status, usage, and configured cost estimates |
 
 Checkpoints use atomic replacement; inbox operations use portable file locks.
-Run **one teammate manager per team directory**. Restoration retains completed tool
+Run **one CLI process per state directory and one teammate manager per team directory**. Restoration retains completed tool
 results and marks incomplete calls as interrupted instead of automatically rerunning
 them. Inspect interrupted actions before retrying: side effects may already have occurred.
 
-Recovery does not guarantee exactly-once execution. A crash between inbox consumption
-and checkpointing can lose an in-memory delivery; retained teammate results remain
-available through `team_status`.
+Messages have stable IDs, leased delivery and explicit acknowledgement. Agent loops
+save received IDs with their conversation checkpoint **before** acknowledging. A crash
+before saving permits redelivery; a crash after saving is deduplicated against those
+IDs, even after context compaction. The `read_inbox` tool acknowledges only after its
+tool result is saved. `send` accepts an optional `message_id` for idempotent retries;
+reusing an ID with different content or recipient is rejected.
+
+Failed deliveries are retried up to `MESSAGE_ATTEMPTS`, then retained as dead letters.
+Inspect `/messages` and use `/message-retry ID` after fixing the cause. Completed teammate
+checkpoints retain an outbox: restoring them republishes the same result ID without
+rerunning the model. Legacy JSONL inboxes migrate automatically and remain as
+`.jsonl.migrated` backups. The low-level `MessageBus.read_inbox()` convenience method
+acknowledges immediately; use the checkpoint-aware `receive()` API for durable consumers.
+
+`/tasks` marks previously running/waiting tasks as interrupted on application restart.
+Task records and message acknowledgements do not make arbitrary shell effects
+transactional: inspect interrupted actions before retrying them. Queue history and
+deduplication IDs are retained; manage their storage together with checkpoint retention.
 
 Event logs omit prompts, tool arguments/results, credentials, and API error bodies.
 Checkpoints contain conversation and tool results, which may be sensitive. Protect
@@ -229,7 +281,9 @@ python -m unittest discover -s tests -v
 
 Coverage includes budgets, tool-call protocol, context compaction, recovery, concurrent
 messaging, teammate controls, shell policy, and real SDK requests against a local HTTP
-fixture, including cancellation and 429 retries. Windows skips Unix local-shell tests.
+fixture, including cancellation and 429 retries. The default end-to-end test exercises
+the complete read → delegate → wait → summarize flow through the SDK against a local
+HTTP fixture; review, crash/restart and message redelivery tests require no API key. Windows skips Unix local-shell tests.
 
 For real Docker checks, use a pre-pulled pinned image:
 
@@ -238,7 +292,10 @@ export EASYAGENTIC_TEST_DOCKER_IMAGE="$EASYAGENTIC_DOCKER_IMAGE"
 python -m unittest discover -s tests -p test_docker.py -v
 ```
 
-For a small, billable live model check, configure credentials and explicitly opt in:
+For billable live model validation, configure credentials and explicitly opt in. The
+suite includes an authentication check and a multi-call repository workflow: read
+README, delegate an architecture review, wait for the teammate, and incorporate its
+result. It asserts actual tool use and durable outcomes:
 
 ```bash
 EASYAGENTIC_RUN_LIVE=1 python -m unittest discover -s tests -p test_live.py -v

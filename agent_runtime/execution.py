@@ -10,6 +10,7 @@ import uuid
 
 from openai import APIConnectionError, APITimeoutError, APIStatusError
 from .config import Settings
+from .review import ReviewRequired
 from .storage import file_lock, jsonable
 
 
@@ -68,6 +69,7 @@ class Task:
     stop: threading.Event = field(default_factory=threading.Event)
     deadline: float = None
     parent: object = None
+    pending_reviews: list = field(default_factory=list)
 
     def __post_init__(self):
         if self.budget is None:
@@ -82,6 +84,12 @@ class Task:
             self.parent.check()
         if time.monotonic() >= self.deadline:
             raise TaskStopped('task deadline exceeded')
+
+    def require_review(self, identifier):
+        if identifier not in self.pending_reviews:
+            self.pending_reviews.append(identifier)
+        if self.parent:
+            self.parent.require_review(identifier)
 
     def child(self, stop=None):
         return Task(self.settings, self.budget, stop=stop or threading.Event(),
@@ -206,7 +214,13 @@ def tool_results(message, registry, task, checkpoint=None):
             start = time.monotonic()
             try:
                 task.check()
-                output = registry.execute_json(call.function.name, call.function.arguments)
+                if task.pending_reviews:
+                    output = 'Error: batch paused for operator review; this operation was not executed.'
+                else:
+                    output = registry.execute_json(call.function.name, call.function.arguments)
+            except ReviewRequired as exc:
+                task.require_review(exc.request_id)
+                output = f'Error: operator review required ({exc.request_id}). No operation executed. Wait for an operator decision and resubmit the exact operation.'
             except (TaskStopped, KeyboardInterrupt):
                 task.stop.set()
                 interrupted = True
@@ -215,6 +229,7 @@ def tool_results(message, registry, task, checkpoint=None):
             results.append(result)
             if checkpoint:
                 checkpoint(result)
+            registry.after_result()
             event(task.settings, task, 'tool_result', tool=call.function.name,
                   duration=time.monotonic()-start, failed=output.startswith('Error'))
     finally:

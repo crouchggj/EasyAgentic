@@ -4,6 +4,7 @@ import json
 
 from .base import Tool, ToolRegistry
 from .bash import BASH_TOOL, handle_bash
+from .write_file import WRITE_FILE_TOOL, handle_write_file
 from .read_file import READ_FILE_TOOL, handle_read_file
 from .todo import TODO_TOOL, TodoManager, create_todo_handler
 from .task import TASK_TOOL, create_task_handler
@@ -37,6 +38,7 @@ def setup_registry(todo_manager: TodoManager, subagent_runner=None, skill_loader
     registry = ToolRegistry()
     registry.register("bash", BASH_TOOL, handle_bash)
     registry.register("read_file", READ_FILE_TOOL, handle_read_file)
+    registry.register("write_file", WRITE_FILE_TOOL, handle_write_file)
     registry.register("todo", TODO_TOOL, create_todo_handler(todo_manager))
     if subagent_runner:
         registry.register("task", TASK_TOOL, create_task_handler(subagent_runner))
@@ -56,7 +58,7 @@ def setup_registry(todo_manager: TodoManager, subagent_runner=None, skill_loader
                               "properties": properties, "required": required}}}, handler)
     if bus:
         registry.register("send", SEND_TOOL, create_send_handler(bus, agent_name))
-        registry.register("read_inbox", READ_INBOX_TOOL, create_read_inbox_handler(bus, agent_name))
+        registry.register("read_inbox", READ_INBOX_TOOL, create_read_inbox_handler(bus, agent_name, registry))
     return registry
 
 
@@ -65,6 +67,8 @@ __all__ = [
     "ToolRegistry",
     "BASH_TOOL",
     "handle_bash",
+    "WRITE_FILE_TOOL",
+    "handle_write_file",
     "READ_FILE_TOOL",
     "handle_read_file",
     "TODO_TOOL",
