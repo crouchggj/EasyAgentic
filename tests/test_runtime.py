@@ -16,7 +16,8 @@ from openai import APIConnectionError, APIStatusError
 import httpx2
 from tools import MessageBus, SkillLoader, SubAgent, TeammateManager, TodoManager, ToolRegistry, setup_registry
 from tools.bash import handle_bash
-from support import reviewed_shell
+from support import cancel_when_ready, reviewed_shell
+from agent_runtime.review import review_queue
 from tools.read_file import handle_read_file
 from test_agents import Client, message, tool_call
 
@@ -250,15 +251,14 @@ class RuntimeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             settings = Settings(workdir=tmp, state_dir=tmp, shell_mode='local', shell_timeout=10, shell_output_bytes=512)
             task = Task(settings)
-            timer = threading.Timer(0.1, task.stop.set)
-            timer.start()
-            try:
-                with task_scope(task):
-                    start = time.monotonic()
-                    self.assertIn('cancelled', reviewed_shell({'command': 'sleep 20'}))
-                    self.assertLess(time.monotonic()-start, 2)
-            finally:
-                timer.cancel()
+            def delayed_review(settings):
+                # Reproduce instrumentation/slow-disk approval latency from CI.
+                time.sleep(0.2)
+                return review_queue(settings)
+            with patch('support.review_queue', side_effect=delayed_review), task_scope(task), cancel_when_ready(task, Path(tmp)/'cancel-ready') as cancellation:
+                self.assertIn('cancelled', reviewed_shell({'command': 'printf ready > cancel-ready; exec sleep 20'}))
+                self.assertTrue(cancellation.ready.is_set(), 'Command never signalled readiness')
+                self.assertLess(time.monotonic()-cancellation.cancelled_at, 2)
             with task_scope(Task(settings)):
                 output = reviewed_shell({'command': 'yes very-large-output'})
                 self.assertIn('output limit', output)

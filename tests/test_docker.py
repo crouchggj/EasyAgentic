@@ -3,13 +3,12 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
-import threading
 import time
 import unittest
 from agent_runtime.config import Settings
 from agent_runtime.execution import Task, task_scope
 from tools.bash import docker_command
-from support import reviewed_shell as handle_bash
+from support import cancel_when_ready, reviewed_shell as handle_bash
 
 
 @unittest.skipUnless(os.environ.get('EASYAGENTIC_TEST_DOCKER_IMAGE'), 'Docker integration requires an explicit pre-pulled digest')
@@ -26,15 +25,10 @@ class DockerTests(unittest.TestCase):
                 self.assertNotIn('Error:', result)
                 self.assertIn('output limit', handle_bash({'command': 'yes output'}))
             task = Task(settings)
-            timer = threading.Timer(0.3, task.stop.set)
-            timer.start()
-            try:
-                with task_scope(task):
-                    start = time.monotonic()
-                    self.assertIn('cancelled', handle_bash({'command': 'sleep 20'}))
-                    self.assertLess(time.monotonic()-start, 5)
-            finally:
-                timer.cancel()
+            with task_scope(task), cancel_when_ready(task, Path(tmp)/'cancel-ready') as cancellation:
+                self.assertIn('cancelled', handle_bash({'command': 'printf ready > cancel-ready; exec sleep 20'}))
+                self.assertTrue(cancellation.ready.is_set(), 'Container command never signalled readiness')
+                self.assertLess(time.monotonic()-cancellation.cancelled_at, 5)
             remaining = subprocess.run(docker_command() + ['ps', '-aq', '--filter', 'name=easyagentic-'],
                                        capture_output=True, text=True, check=True, timeout=10)
             self.assertEqual(remaining.stdout.strip(), '')
