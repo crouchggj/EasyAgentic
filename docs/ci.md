@@ -7,7 +7,7 @@ required checks. Superseded runs are cancelled and jobs have explicit timeouts.
 | Check | Requirement |
 | --- | --- |
 | Ruff | `E9`/`F` correctness checks, including unused names and undefined variables |
-| Test matrix | Ubuntu/Windows with Python 3.10, 3.12 and 3.13 |
+| Test matrix | Linux (Ubuntu) with Python 3.10, 3.12 and 3.13 |
 | Coverage | Branch coverage ≥80% overall; ≥85% across execution, review, messaging, teammates and file writing |
 | Dependency audit | No known vulnerabilities in any exact runtime dependency from `requirements.lock` |
 | Docker isolation | Real container isolation and cancellation checks |

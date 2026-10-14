@@ -304,8 +304,8 @@ EASYAGENTIC_RUN_LIVE=1 python -m unittest discover -s tests -p test_live.py -v
 Skipped checks do not establish integration readiness. Opting into the live test
 without a credential fails the test.
 
-[GitHub Actions](.github/workflows/tests.yml) runs Python 3.10, 3.12, and 3.13 on Ubuntu
-and Windows, plus Docker isolation on Ubuntu. The manually dispatched `live-model`
+[GitHub Actions](.github/workflows/tests.yml) runs Python 3.10, 3.12, and 3.13 on Linux
+(Ubuntu), plus Docker isolation on Ubuntu. Windows CI is not enabled. The manually dispatched `live-model`
 job requires `MODEL_API_KEY` in the `model-integration` GitHub environment; its optional
 `MODEL` variable selects the model.
 
