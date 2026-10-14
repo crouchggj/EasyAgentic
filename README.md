@@ -323,13 +323,18 @@ The ruleset must be applied in GitHub settings; committing it does not activate 
 ## Project layout
 
 ```text
-main.py             CLI and lead Agent loop
+main.py             Compatible script entry point
+easyagentic/        Application assembly, CLI commands, and agent orchestration
 agent_runtime/      Settings, budgets, model client, checkpoints, and telemetry
-tools/              Tool registry, handlers, subagents, and teammate coordination
+tools/              Tool registry, handlers, and compatibility exports
 skills/             Markdown workflows loaded on demand
 tests/              Regression and integration tests
 requirements.lock   Exact dependency versions
 ```
+
+From the repository root, `python -m easyagentic` also starts the CLI.
+See [architecture and incremental refactoring](docs/architecture.md) for module
+boundaries and compatibility guarantees.
 
 To upgrade dependencies, update `requirements.txt` deliberately, resolve in a fresh
 virtual environment, regenerate `requirements.lock`, and run the tests before committing.

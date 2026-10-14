@@ -1,9 +1,6 @@
 """Build the production stack for local and opt-in live workflow validation."""
 from pathlib import Path
-from agent_runtime.storage import SessionStore
-from main import AgentLoop
-from tools import MessageBus, SkillLoader, SubAgent, TeammateManager, TodoManager, setup_registry
-
+from easyagentic.bootstrap import create_application
 
 WORKFLOW_QUERY = (
     'Read README.md to analyze this repository. Spawn exactly one teammate named reviewer, '
@@ -14,13 +11,9 @@ WORKFLOW_QUERY = (
 
 
 def build_agent(client, settings):
-    state = settings.state_path
-    bus = MessageBus(state/'team',settings.message_lease,settings.message_attempts)
-    manager = TeammateManager(state/'team',client,settings.model,bus,settings=settings)
-    todo = TodoManager()
-    skills = SkillLoader(str(Path(__file__).resolve().parents[1]/'skills'))
-    child = SubAgent(client,settings.model,settings=settings)
-    registry = setup_registry(todo,subagent_runner=child.run,skill_loader=skills,team_manager=manager,bus=bus)
-    agent = AgentLoop(client,registry,todo,child,skills,bus,manager,settings=settings,
-                      store=SessionStore(state/'session.json'))
-    return agent,manager
+    application = create_application(
+        settings, client=client,
+        skills_dir=Path(__file__).resolve().parents[1]/'skills',
+        team_dir=settings.state_path/'team',
+    )
+    return application.agent, application.team_manager

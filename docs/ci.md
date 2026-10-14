@@ -33,7 +33,7 @@ python -m coverage erase
 python -m coverage run -m unittest discover -s tests -v
 python -m coverage combine
 python -m coverage report --fail-under=80
-python -m coverage report --include="agent_runtime/execution.py,agent_runtime/review.py,agent_runtime/messages.py,tools/team.py,tools/write_file.py" --fail-under=85
+python -m coverage report --include="agent_runtime/execution.py,agent_runtime/review.py,agent_runtime/messages.py,easyagentic/agents/teammates.py,tools/write_file.py" --fail-under=85
 python -m coverage xml
 python -m coverage html
 python -m pip_audit --strict -r requirements.lock --no-deps --disable-pip

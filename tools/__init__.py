@@ -1,103 +1,57 @@
-"""Tools package."""
+"""Compatibility exports; concrete tools and agents are imported only on demand."""
+from importlib import import_module
 
-import json
+_EXPORTS = {
+    'Tool': 'tools.base',
+    'ToolRegistry': 'tools.base',
+    'BASH_TOOL': 'tools.bash',
+    'handle_bash': 'tools.bash',
+    'WRITE_FILE_TOOL': 'tools.write_file',
+    'handle_write_file': 'tools.write_file',
+    'READ_FILE_TOOL': 'tools.read_file',
+    'handle_read_file': 'tools.read_file',
+    'TODO_TOOL': 'tools.todo',
+    'TodoManager': 'tools.todo',
+    'create_todo_handler': 'tools.todo',
+    'TASK_TOOL': 'tools.task',
+    'create_task_handler': 'tools.task',
+    'SubAgent': 'easyagentic.agents.subagent',
+    'SUBAGENT_SYSTEM': 'easyagentic.agents.subagent',
+    'setup_registry': 'tools.registry',
+    'COLORS': 'tools.colors',
+    'TOOL_COLORS': 'tools.colors',
+    'colorize': 'tools.colors',
+    'tool_header': 'tools.colors',
+    'tool_args': 'tools.colors',
+    'tool_output': 'tools.colors',
+    'round_header': 'tools.colors',
+    'SkillLoader': 'tools.skills',
+    'Skill': 'tools.skills',
+    'SKILL_TOOL': 'tools.skills',
+    'create_skill_handler': 'tools.skills',
+    'MessageBus': 'agent_runtime.messages',
+    'TeammateManager': 'easyagentic.agents.teammates',
+    'Teammate': 'easyagentic.agents.teammates',
+    'TEAMMATE_SYSTEM': 'easyagentic.agents.teammates',
+    'SPAWN_TOOL': 'tools.collaboration',
+    'SEND_TOOL': 'tools.collaboration',
+    'READ_INBOX_TOOL': 'tools.collaboration',
+    'create_spawn_handler': 'tools.collaboration',
+    'create_send_handler': 'tools.collaboration',
+    'create_read_inbox_handler': 'tools.collaboration',
+}
 
-from .base import Tool, ToolRegistry
-from .bash import BASH_TOOL, handle_bash
-from .write_file import WRITE_FILE_TOOL, handle_write_file
-from .read_file import READ_FILE_TOOL, handle_read_file
-from .todo import TODO_TOOL, TodoManager, create_todo_handler
-from .task import TASK_TOOL, create_task_handler
-from .subagent import SubAgent, SUBAGENT_SYSTEM
-from .colors import COLORS, TOOL_COLORS, colorize, tool_header, tool_args, tool_output, round_header
-from .skills import SkillLoader, Skill, SKILL_TOOL, create_skill_handler
-from .team import (
-    MessageBus, TeammateManager, Teammate,
-    SPAWN_TOOL, SEND_TOOL, READ_INBOX_TOOL,
-    create_spawn_handler, create_send_handler, create_read_inbox_handler,
-    TEAMMATE_SYSTEM
-)
-
-
-def setup_registry(todo_manager: TodoManager, subagent_runner=None, skill_loader: SkillLoader = None,
-                   team_manager: TeammateManager = None, bus: MessageBus = None, agent_name: str = "lead") -> ToolRegistry:
-    """Setup and return tool registry with all tools registered.
-
-    Args:
-        todo_manager: TodoManager instance
-        subagent_runner: Optional callable for running subagents. If provided,
-                         the task tool will be registered.
-        skill_loader: Optional SkillLoader instance. If provided,
-                      the skill tool will be registered.
-        team_manager: Optional TeammateManager instance. If provided,
-                      spawn tool will be registered.
-        bus: Optional MessageBus instance. If provided,
-             send/read_inbox tools will be registered.
-        agent_name: Name of this agent (for message routing).
-    """
-    registry = ToolRegistry()
-    registry.register("bash", BASH_TOOL, handle_bash)
-    registry.register("read_file", READ_FILE_TOOL, handle_read_file)
-    registry.register("write_file", WRITE_FILE_TOOL, handle_write_file)
-    registry.register("todo", TODO_TOOL, create_todo_handler(todo_manager))
-    if subagent_runner:
-        registry.register("task", TASK_TOOL, create_task_handler(subagent_runner))
-    if skill_loader:
-        registry.register("skill", SKILL_TOOL, create_skill_handler(skill_loader))
-    if team_manager:
-        registry.register("spawn", SPAWN_TOOL, create_spawn_handler(team_manager))
-        controls = {
-            "team_status": ("List teammate status, task IDs, outcomes and results.", {}, [], lambda a: json.dumps(team_manager.list_members())),
-            "team_wait": ("Wait for a teammate; returns status and result without draining inbox.", {"name": {"type": "string"}, "timeout": {"type": "number", "minimum": 0}}, ["name"], lambda a: team_manager.wait(a["name"], a.get("timeout", 30))),
-            "team_cancel": ("Cancel a teammate and stop its current work.", {"name": {"type": "string"}}, ["name"], lambda a: team_manager.shutdown(a["name"])),
-            "team_resume": ("Explicitly resume a stopped teammate from a checkpoint; never replay completed tools.", {"name": {"type": "string"}}, ["name"], lambda a: team_manager.resume(a["name"])),
-        }
-        for name, (description, properties, required, handler) in controls.items():
-            registry.register(name, {"type": "function", "function": {"name": name,
-                              "description": description, "parameters": {"type": "object",
-                              "properties": properties, "required": required}}}, handler)
-    if bus:
-        registry.register("send", SEND_TOOL, create_send_handler(bus, agent_name))
-        registry.register("read_inbox", READ_INBOX_TOOL, create_read_inbox_handler(bus, agent_name, registry))
-    return registry
+__all__ = list(_EXPORTS)
 
 
-__all__ = [
-    "Tool",
-    "ToolRegistry",
-    "BASH_TOOL",
-    "handle_bash",
-    "WRITE_FILE_TOOL",
-    "handle_write_file",
-    "READ_FILE_TOOL",
-    "handle_read_file",
-    "TODO_TOOL",
-    "TodoManager",
-    "create_todo_handler",
-    "TASK_TOOL",
-    "create_task_handler",
-    "SubAgent",
-    "SUBAGENT_SYSTEM",
-    "setup_registry",
-    "COLORS",
-    "TOOL_COLORS",
-    "colorize",
-    "tool_header",
-    "tool_args",
-    "tool_output",
-    "round_header",
-    "SkillLoader",
-    "Skill",
-    "SKILL_TOOL",
-    "create_skill_handler",
-    "MessageBus",
-    "TeammateManager",
-    "Teammate",
-    "SPAWN_TOOL",
-    "SEND_TOOL",
-    "READ_INBOX_TOOL",
-    "create_spawn_handler",
-    "create_send_handler",
-    "create_read_inbox_handler",
-    "TEAMMATE_SYSTEM",
-]
+def __getattr__(name):
+    module = _EXPORTS.get(name)
+    if module is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    value = getattr(import_module(module), name)
+    globals()[name] = value
+    return value
+
+
+def __dir__():
+    return sorted(set(globals()) | set(__all__))

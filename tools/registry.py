@@ -1,0 +1,61 @@
+"""Compose tool capabilities without importing concrete agent implementations."""
+from __future__ import annotations
+
+import json
+from typing import TYPE_CHECKING
+from .base import ToolRegistry
+from .bash import BASH_TOOL, handle_bash
+from .write_file import WRITE_FILE_TOOL, handle_write_file
+from .read_file import READ_FILE_TOOL, handle_read_file
+from .todo import TODO_TOOL, TodoManager, create_todo_handler
+from .task import TASK_TOOL, create_task_handler
+from .skills import SkillLoader, SKILL_TOOL, create_skill_handler
+from .collaboration import SPAWN_TOOL, SEND_TOOL, READ_INBOX_TOOL, create_spawn_handler, create_send_handler, create_read_inbox_handler
+
+if TYPE_CHECKING:
+    from agent_runtime.messages import MessageBus
+    from easyagentic.agents.teammates import TeammateManager
+
+
+def setup_registry(todo_manager: TodoManager, subagent_runner=None, skill_loader: SkillLoader = None,
+                   team_manager: TeammateManager = None, bus: MessageBus = None, agent_name: str = "lead") -> ToolRegistry:
+    """Setup and return tool registry with all tools registered.
+
+    Args:
+        todo_manager: TodoManager instance
+        subagent_runner: Optional callable for running subagents. If provided,
+                         the task tool will be registered.
+        skill_loader: Optional SkillLoader instance. If provided,
+                      the skill tool will be registered.
+        team_manager: Optional TeammateManager instance. If provided,
+                      spawn tool will be registered.
+        bus: Optional MessageBus instance. If provided,
+             send/read_inbox tools will be registered.
+        agent_name: Name of this agent (for message routing).
+    """
+    registry = ToolRegistry()
+    registry.register("bash", BASH_TOOL, handle_bash)
+    registry.register("read_file", READ_FILE_TOOL, handle_read_file)
+    registry.register("write_file", WRITE_FILE_TOOL, handle_write_file)
+    registry.register("todo", TODO_TOOL, create_todo_handler(todo_manager))
+    if subagent_runner:
+        registry.register("task", TASK_TOOL, create_task_handler(subagent_runner))
+    if skill_loader:
+        registry.register("skill", SKILL_TOOL, create_skill_handler(skill_loader))
+    if team_manager:
+        registry.register("spawn", SPAWN_TOOL, create_spawn_handler(team_manager))
+        controls = {
+            "team_status": ("List teammate status, task IDs, outcomes and results.", {}, [], lambda a: json.dumps(team_manager.list_members())),
+            "team_wait": ("Wait for a teammate; returns status and result without draining inbox.", {"name": {"type": "string"}, "timeout": {"type": "number", "minimum": 0}}, ["name"], lambda a: team_manager.wait(a["name"], a.get("timeout", 30))),
+            "team_cancel": ("Cancel a teammate and stop its current work.", {"name": {"type": "string"}}, ["name"], lambda a: team_manager.shutdown(a["name"])),
+            "team_resume": ("Explicitly resume a stopped teammate from a checkpoint; never replay completed tools.", {"name": {"type": "string"}}, ["name"], lambda a: team_manager.resume(a["name"])),
+        }
+        for name, (description, properties, required, handler) in controls.items():
+            registry.register(name, {"type": "function", "function": {"name": name,
+                              "description": description, "parameters": {"type": "object",
+                              "properties": properties, "required": required}}}, handler)
+    if bus:
+        registry.register("send", SEND_TOOL, create_send_handler(bus, agent_name))
+        registry.register("read_inbox", READ_INBOX_TOOL, create_read_inbox_handler(bus, agent_name, registry))
+    return registry
+

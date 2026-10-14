@@ -125,7 +125,7 @@ class HTTPTests(unittest.TestCase):
         self.assertIn('Session reset', result.stdout)
         self.assertIn('Session restored', result.stdout)
         self.assertIn('Goodbye!', result.stdout)
-        result = subprocess.run([sys.executable, 'main.py'], input='', env=env, text=True,
+        result = subprocess.run([sys.executable, '-m', 'easyagentic'], input='', env=env, text=True,
                                 capture_output=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('Goodbye!', result.stdout)
