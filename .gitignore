@@ -9,3 +9,12 @@ test/
 .env
 .env.*
 !.env.example
+
+# Local CI reports and caches
+.coverage
+.coverage.*
+coverage.xml
+coverage.json
+htmlcov/
+audit.json
+.ruff_cache/

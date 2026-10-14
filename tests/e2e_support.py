@@ -14,7 +14,6 @@ WORKFLOW_QUERY = (
 
 
 def build_agent(client, settings):
-    root = Path(settings.workdir)
     state = settings.state_path
     bus = MessageBus(state/'team',settings.message_lease,settings.message_attempts)
     manager = TeammateManager(state/'team',client,settings.model,bus,settings=settings)

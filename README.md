@@ -309,6 +309,17 @@ and Windows, plus Docker isolation on Ubuntu. The manually dispatched `live-mode
 job requires `MODEL_API_KEY` in the `model-integration` GitHub environment; its optional
 `MODEL` variable selects the model.
 
+### Quality and merge checks
+
+CI also runs Ruff correctness checks, branch coverage gates (80% overall and 85%
+across critical runtime paths), and a strict audit of the runtime dependency lock.
+Coverage and audit reports are available as workflow artifacts. A stable `CI gate`
+check aggregates all required jobs; optional live-model checks remain separate.
+
+See [CI configuration and branch protection](docs/ci.md) for local commands, report
+retention, weekly security scans, and the ready-to-import main-branch ruleset.
+The ruleset must be applied in GitHub settings; committing it does not activate it.
+
 ## Project layout
 
 ```text

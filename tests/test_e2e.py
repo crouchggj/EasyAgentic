@@ -16,7 +16,6 @@ from e2e_support import WORKFLOW_QUERY, build_agent
 
 class EndToEndTests(unittest.TestCase):
     def test_read_delegate_wait_summarize_through_real_sdk(self):
-        owner = self
         requests = []
         stages = {'lead':0,'peer':0}
         lock = threading.Lock()

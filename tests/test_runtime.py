@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from agent_runtime.config import Settings
 from agent_runtime.execution import Budget, Task, TaskStopped, compact, completion, task_scope, token_bound
-from agent_runtime.storage import SessionStore, repair_history
+from agent_runtime.storage import SessionStore
 from main import AgentLoop
 from openai import APIConnectionError, APIStatusError
 import httpx2

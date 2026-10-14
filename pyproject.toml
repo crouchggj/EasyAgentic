@@ -1,0 +1,23 @@
+[tool.ruff]
+target-version = "py310"
+exclude = [".venv", ".venvs", ".easyagentic", ".team"]
+
+[tool.ruff.lint]
+# Start with correctness checks; formatting is intentionally outside this gate.
+select = ["E9", "F"]
+
+[tool.coverage.run]
+branch = true
+patch = ["subprocess"]
+source = ["agent_runtime", "tools", "main"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+precision = 2
+
+[tool.coverage.xml]
+output = "coverage.xml"
+
+[tool.coverage.html]
+directory = "htmlcov"

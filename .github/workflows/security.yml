@@ -1,0 +1,41 @@
+name: Dependency audit
+on:
+  workflow_call:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 2 * * 1'
+permissions:
+  contents: read
+jobs:
+  audit:
+    name: Runtime dependency audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements-ci.txt
+      - run: python -m pip install -r requirements-ci.txt
+      - name: Audit every locked runtime dependency
+        run: python -m pip_audit --strict --requirement requirements.lock --no-deps --disable-pip --format json --output audit.json
+      - name: Reject incomplete audit results
+        run: |
+          python - <<'PY_AUDIT'
+          import json
+          from pathlib import Path
+          dependencies = json.loads(Path('audit.json').read_text())['dependencies']
+          skipped = [d['name'] for d in dependencies if d.get('skip_reason')]
+          if not dependencies or skipped:
+              raise SystemExit('Incomplete dependency audit: ' + ', '.join(skipped))
+          print(f'Audited {len(dependencies)} locked dependencies without skips')
+          PY_AUDIT
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: runtime-dependency-audit
+          path: audit.json
+          retention-days: 14
+          if-no-files-found: warn

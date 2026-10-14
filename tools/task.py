@@ -1,6 +1,5 @@
 """Task tool for spawning subagents."""
 
-import json
 
 TASK_TOOL = {
     "type": "function",
